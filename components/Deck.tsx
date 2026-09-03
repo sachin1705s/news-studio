@@ -16,6 +16,7 @@ import type { Program } from "@/lib/programs";
 import { buildPrompt } from "@/lib/prompt";
 import { buildRundown, headlinesFor } from "@/lib/rundown";
 import { STRANDS, strandAt } from "@/lib/strands";
+import { stockShot } from "@/lib/stock-shots";
 import type { Segment, Story } from "@/lib/types";
 
 /** Metadata rides with every clip and comes back on every message about it, so
@@ -204,10 +205,16 @@ function DeckInner({
     pool.forEach((s) => usedStoryIds.current.add(s.id));
     if (usedStoryIds.current.size > 400) usedStoryIds.current.clear();
 
-    // Shots for the whole block in one request. A failure here costs the
-    // cutaways, not the bulletin — the block simply runs as anchor reads.
-    const shots = new Map<string, string>();
+    // Every story with a summary gets footage. The library is the floor, so the
+    // channel always cuts away; Claude overwrites it with a shot written for the
+    // actual headline whenever a key is configured and the call succeeds.
     const wanted = headlinesFor(pool);
+    const shots = new Map<string, string>();
+    wanted.forEach((w, i) => {
+      const shot = stockShot(pool.find((p) => p.id === w.id)!, strand.id, i);
+      if (shot) shots.set(w.id, shot);
+    });
+
     if (wanted.length) {
       try {
         const shotRes = await fetch("/api/broll", {
@@ -219,21 +226,20 @@ function DeckInner({
           }),
         });
         const body = (await shotRes.json()) as { shots?: string[]; error?: string };
-        if (!shotRes.ok) {
-          if (!brollWarned.current) {
-            brollWarned.current = true;
-            onError(`${body.error ?? "Shot lookup failed"} Running anchor-only.`);
-          }
-        } else {
+        if (shotRes.ok) {
           (body.shots ?? []).forEach((shot, i) => {
             const target = wanted[i];
             if (target && shot?.trim()) shots.set(target.id, shot.trim());
           });
+        } else if (!brollWarned.current) {
+          brollWarned.current = true;
+          // Not a failure of the broadcast — say what the viewer is getting instead.
+          onError(`${body.error ?? "Shot lookup failed."} Using library footage.`);
         }
       } catch {
         if (!brollWarned.current) {
           brollWarned.current = true;
-          onError("Shot lookup unreachable. Running anchor-only.");
+          onError("Shot lookup unreachable. Using library footage.");
         }
       }
     }
