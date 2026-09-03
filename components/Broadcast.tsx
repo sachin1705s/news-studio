@@ -195,6 +195,29 @@ export function Broadcast() {
   }, [role, onAir, registerChannel]);
 
   /**
+   * Take over the channel because nothing is actually broadcasting.
+   *
+   * Clears the registration first: it names a session that is gone, and any
+   * other arrival that reads it would attach to the same corpse.
+   */
+  const takeOverDeadChannel = useCallback(async () => {
+    try {
+      await fetch("/api/channel", { method: "DELETE" });
+    } catch {
+      // Clearing is a courtesy to other arrivals; failing it is not fatal.
+    }
+    setAdoptSessionId(null);
+    setRole("origin");
+    setMounted([true, false]);
+    setLive(0);
+    setOpeningUntil(Date.now() + STRAND_MINUTES * 60_000);
+    setOnAir(true);
+    // No click has happened, so sound has to wait for the prompt.
+    setMuted(true);
+    airStart.current = Date.now();
+  }, []);
+
+  /**
    * Join whatever is already on air, without being asked.
    *
    * A viewer arriving at a running channel should see the channel, not a door.
@@ -211,7 +234,12 @@ export function Broadcast() {
         if (!res.ok) return;
         const body = (await res.json()) as { channel?: { sessionId: string } | null };
         const sid = body.channel?.sessionId;
-        if (!sid || cancelled) return;
+        if (cancelled) return;
+        if (!sid) {
+          // Nobody is broadcasting. Rather than show a door, be the channel.
+          void takeOverDeadChannel();
+          return;
+        }
         setAdoptSessionId(sid);
         setRole("viewer");
         setMuted(true);
@@ -225,7 +253,7 @@ export function Broadcast() {
     return () => {
       cancelled = true;
     };
-  }, [onAir, role]);
+  }, [onAir, role, takeOverDeadChannel]);
 
   /**
    * Announce this viewer, and read back how many others are here.
@@ -618,6 +646,7 @@ export function Broadcast() {
                   setAdoptSessionId(null);
                   void takeAir();
                 }}
+                onDeadSession={() => void takeOverDeadChannel()}
                 onError={pushError}
               />
             </div>

@@ -149,6 +149,7 @@ export function ViewerDeck({
   onSegment,
   onPictureLive,
   onSessionLost,
+  onDeadSession,
   onError,
 }: {
   sessionId: string;
@@ -158,6 +159,8 @@ export function ViewerDeck({
   onSegment: (meta: ClipMeta) => void;
   onPictureLive: () => void;
   onSessionLost: () => void;
+  /** Attached, but the broadcast never produced a frame — the session is dead. */
+  onDeadSession: () => void;
   onError: (message: string) => void;
 }) {
   const jwt = useCallback(() => fetchToken(sessionId), [sessionId]);
@@ -172,6 +175,7 @@ export function ViewerDeck({
         onSegment={onSegment}
         onPictureLive={onPictureLive}
         onSessionLost={onSessionLost}
+        onDeadSession={onDeadSession}
         onError={onError}
       />
     </FastH3Provider>
@@ -183,10 +187,12 @@ function ViewerInner({
   onSegment,
   onPictureLive,
   onSessionLost,
+  onDeadSession,
   onError,
 }: {
   program: Program;
   muted: boolean;
+  onDeadSession: () => void;
   onSegment: (meta: ClipMeta) => void;
   onPictureLive: () => void;
   onSessionLost: () => void;
@@ -216,6 +222,20 @@ function ViewerInner({
     const meta = parseMeta(message.clip.metadata);
     if (meta) onSegment(meta);
   });
+
+  /**
+   * A registration can outlive the broadcast it names — the origin's tab is
+   * killed, its beacon never fires, and the record sits there until it ages
+   * out. A viewer that adopts one attaches to nothing and stares at black
+   * forever, so an adoption that produces no picture is treated as a dead
+   * session rather than a slow one.
+   */
+  useEffect(() => {
+    const id = setTimeout(() => {
+      if (!sawPicture.current) onDeadSession();
+    }, 30_000);
+    return () => clearTimeout(id);
+  }, [onDeadSession]);
 
   useFastH3CommandError((message) => {
     onError(`${message.command}: ${message.reason}`);
