@@ -14,7 +14,8 @@ import {
 } from "@reactor-models/fast-h3";
 import type { Program } from "@/lib/programs";
 import { buildPrompt } from "@/lib/prompt";
-import { buildRundown } from "@/lib/rundown";
+import { buildRundown, headlinesFor } from "@/lib/rundown";
+import { STRANDS, strandAt } from "@/lib/strands";
 import type { Segment, Story } from "@/lib/types";
 
 /** Metadata rides with every clip and comes back on every message about it, so
@@ -24,6 +25,8 @@ export interface ClipMeta {
   strap: string;
   kind: Segment["kind"];
   program: string;
+  strand: string;
+  kicker: string;
 }
 
 export interface DeckStats {
@@ -107,6 +110,7 @@ function DeckInner({
   const cycle = useRef(0);
   const feeding = useRef(false);
   const sawPicture = useRef(false);
+  const brollWarned = useRef(false);
   const reportedLoss = useRef(false);
   const capacity = useRef({ free: 0 });
 
@@ -184,7 +188,11 @@ function DeckInner({
   }, [status, stateArrived, configured]);
 
   const refill = useCallback(async () => {
-    const params = new URLSearchParams({ categories: program.categories.join(",") });
+    // The strand is read fresh each refill, so a block boundary changes what
+    // the channel covers on the next batch without interrupting what is on air.
+    const { strand } = strandAt(new Date());
+
+    const params = new URLSearchParams({ categories: strand.categories.join(",") });
     const res = await fetch(`/api/news?${params}`, { cache: "no-store" });
     if (!res.ok) throw new Error(`News fetch failed (${res.status})`);
     const { stories } = (await res.json()) as { stories: Story[] };
@@ -192,13 +200,47 @@ function DeckInner({
     // Prefer stories this channel has not run yet; fall back to the full list
     // once the wire has been exhausted rather than going silent.
     const fresh = stories.filter((s) => !usedStoryIds.current.has(s.id));
-    const pool = (fresh.length >= 4 ? fresh : stories).slice(0, 9);
+    const pool = (fresh.length >= 4 ? fresh : stories).slice(0, 8);
     pool.forEach((s) => usedStoryIds.current.add(s.id));
     if (usedStoryIds.current.size > 400) usedStoryIds.current.clear();
 
-    pending.current = buildRundown(pool, program, cycle.current++);
+    // Shots for the whole block in one request. A failure here costs the
+    // cutaways, not the bulletin — the block simply runs as anchor reads.
+    const shots = new Map<string, string>();
+    const wanted = headlinesFor(pool);
+    if (wanted.length) {
+      try {
+        const shotRes = await fetch("/api/broll", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            headlines: wanted.map((w) => w.text),
+            lookFor: strand.lookFor,
+          }),
+        });
+        const body = (await shotRes.json()) as { shots?: string[]; error?: string };
+        if (!shotRes.ok) {
+          if (!brollWarned.current) {
+            brollWarned.current = true;
+            onError(`${body.error ?? "Shot lookup failed"} Running anchor-only.`);
+          }
+        } else {
+          (body.shots ?? []).forEach((shot, i) => {
+            const target = wanted[i];
+            if (target && shot?.trim()) shots.set(target.id, shot.trim());
+          });
+        }
+      } catch {
+        if (!brollWarned.current) {
+          brollWarned.current = true;
+          onError("Shot lookup unreachable. Running anchor-only.");
+        }
+      }
+    }
+
+    pending.current = buildRundown(pool, program, strand, cycle.current++, shots);
     onQueuePreview(pending.current.slice(0, 8));
-  }, [program, usedStoryIds, onQueuePreview]);
+  }, [program, usedStoryIds, onQueuePreview, onError]);
 
   /** Keep the generation queue as full as the model will allow. */
   const topUp = useCallback(async () => {
@@ -210,17 +252,24 @@ function DeckInner({
         const segment = pending.current.shift();
         if (!segment) break;
 
+        const strand = STRANDS[segment.strandId] ?? strandAt(new Date()).strand;
         const meta: ClipMeta = {
           slug: segment.slug,
           strap: segment.strap,
           kind: segment.kind,
           program: program.name,
+          strand: strand.name,
+          kicker: strand.kicker,
         };
+
+        // The anchor still opens anchor shots only. A cutaway is a different
+        // scene entirely, so seeding it from the studio frame would fight the shot.
+        const useStill = still.current && segment.kind !== "broll";
 
         await enqueue({
           prompt: buildPrompt(segment, program, clipSeconds.current, !!still.current),
           metadata: JSON.stringify(meta),
-          ...(still.current ? { starting_frame: still.current } : {}),
+          ...(useStill ? { starting_frame: still.current } : {}),
         });
         capacity.current.free -= 1;
         onQueuePreview(pending.current.slice(0, 8));

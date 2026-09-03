@@ -84,6 +84,11 @@ export function buildPrompt(
   hasAnchorStill: boolean,
 ): string {
   const script = sanitiseScript(composeScript(segment, wordBudget(clipSeconds)));
+
+  if (segment.kind === "broll" && segment.shot) {
+    return buildBrollPrompt(segment.shot, script, program, clipSeconds);
+  }
+
   const audio = `Audio: ${program.bed}; the anchor's voice close and dry on a broadcast microphone.`;
 
   const parts = hasAnchorStill
@@ -111,6 +116,42 @@ export function buildPrompt(
   if (prompt.length > PROMPT_LIMIT) {
     const overflow = prompt.length - PROMPT_LIMIT;
     const shorter = fitWords(script, Math.max(6, wordBudget(clipSeconds) - Math.ceil(overflow / 5)));
+    prompt = prompt.replace(script, shorter);
+  }
+  return prompt.slice(0, PROMPT_LIMIT);
+}
+
+/**
+ * The cutaway.
+ *
+ * The anchor is not in this shot — they are heard over it. The prompt has to
+ * say that plainly, because a model given a news script and no instruction will
+ * put a presenter back in frame. Everything the picture needs comes from the
+ * shot description; everything the sound needs is the voiceover plus the
+ * location's own atmosphere, which replaces the studio bed for these seconds.
+ */
+function buildBrollPrompt(
+  shot: string,
+  script: string,
+  program: Program,
+  clipSeconds: number,
+): string {
+  const shotText = shot.replace(/\s+/g, " ").trim().replace(/[.]+$/, "");
+  const parts = [
+    `Documentary news footage, no presenter on screen, no text or graphics:`,
+    `${cap(shotText)}.`,
+    `Steady handheld camera, natural light, real location.`,
+    `S1 (an unseen news anchor, voiceover over the footage, ${program.tone}): "${script}"`,
+    `Audio: the location's own atmosphere under the voice; no studio music.`,
+  ];
+
+  let prompt = parts.join(" ").replace(/\s+/g, " ").trim();
+  if (prompt.length > PROMPT_LIMIT) {
+    // The look clause is the first thing worth losing; the shot and the voice are not.
+    prompt = [parts[0], parts[1], parts[3], parts[4]].join(" ").replace(/\s+/g, " ").trim();
+  }
+  if (prompt.length > PROMPT_LIMIT) {
+    const shorter = fitWords(script, Math.max(6, wordBudget(clipSeconds) - 8));
     prompt = prompt.replace(script, shorter);
   }
   return prompt.slice(0, PROMPT_LIMIT);

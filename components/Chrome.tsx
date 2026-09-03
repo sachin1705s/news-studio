@@ -2,7 +2,7 @@
 
 import { useEffect, useRef, useState } from "react";
 import type { Program } from "@/lib/programs";
-import { upcoming } from "@/lib/programs";
+import { upcomingStrands, STRAND_MINUTES } from "@/lib/strands";
 import { stripTail } from "@/lib/rundown";
 import type { Segment } from "@/lib/types";
 import type { ClipMeta, DeckStats } from "./Deck";
@@ -40,7 +40,13 @@ export function ChannelBug({ program, onAir }: { program: Program; onAir: boolea
 export function LowerThird({ meta, program }: { meta: ClipMeta | null; program: Program }) {
   if (!meta) return null;
   const kicker =
-    meta.kind === "story" ? "BREAKING" : meta.kind === "bumper" ? "COMING UP" : program.name.toUpperCase();
+    meta.kind === "bumper"
+      ? "COMING UP"
+      : meta.kind === "broll"
+        ? meta.kicker
+        : meta.kind === "story"
+          ? meta.kicker
+          : meta.strand.toUpperCase();
   return (
     <div className="lower-third" key={meta.slug}>
       <div className="lt-kicker" style={{ background: program.accent }}>
@@ -76,30 +82,42 @@ export function Ticker({ segments }: { segments: Segment[] }) {
 }
 
 export function ScheduleRail({ program }: { program: Program }) {
-  const [rows, setRows] = useState<ReturnType<typeof upcoming>>([]);
+  const [rows, setRows] = useState<ReturnType<typeof upcomingStrands>>([]);
   useEffect(() => {
-    const tick = () => setRows(upcoming(new Date(), 6));
+    const tick = () => setRows(upcomingStrands(new Date(), 6));
     tick();
-    const id = setInterval(tick, 30_000);
+    // Blocks turn over every ten minutes; a twenty-second tick keeps the rail
+    // honest without re-rendering the whole rail every second.
+    const id = setInterval(tick, 20_000);
     return () => clearInterval(id);
   }, [program.id]);
 
   return (
     <section className="panel">
-      <h2 className="panel-title">Schedule</h2>
+      <h2 className="panel-title">Schedule · {STRAND_MINUTES}-minute blocks</h2>
       <ol className="sched">
-        {rows.map(({ program: p, startsAt, live }) => (
-          <li key={`${p.id}-${startsAt.getTime()}`} className={live ? "sched-row is-live" : "sched-row"}>
+        {rows.map((row, i) => (
+          <li
+            key={row.startsAt.getTime()}
+            className={i === 0 ? "sched-row is-live" : "sched-row"}
+          >
             <time className="sched-time">
-              {startsAt.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", hour12: false })}
+              {row.startsAt.toLocaleTimeString([], {
+                hour: "2-digit",
+                minute: "2-digit",
+                hour12: false,
+              })}
             </time>
             <div className="sched-body">
-              <div className="sched-name" style={live ? { color: p.accent } : undefined}>
-                {p.name}
+              <div
+                className="sched-name"
+                style={i === 0 ? { color: row.program.accent } : undefined}
+              >
+                {row.strand.name}
               </div>
-              <div className="sched-strap">{p.strap}</div>
+              <div className="sched-strap">{row.program.name}</div>
             </div>
-            {live && <span className="sched-flag">ON AIR</span>}
+            {i === 0 && <span className="sched-flag">ON AIR</span>}
           </li>
         ))}
       </ol>
@@ -120,7 +138,9 @@ export function RundownRail({ segments }: { segments: Segment[] }) {
               <span className="run-index">{String(i + 1).padStart(2, "0")}</span>
               <div className="run-body">
                 <div className="run-slug">{stripTail(s.slug)}</div>
-                <div className="run-strap">{s.kind === "story" ? s.strap : s.kind.toUpperCase()}</div>
+                <div className="run-strap">
+                  {s.kind === "broll" ? `FOOTAGE · ${s.shot ? s.shot.slice(0, 48) : ""}` : s.kind === "story" ? s.strap : s.kind.toUpperCase()}
+                </div>
               </div>
             </li>
           ))}

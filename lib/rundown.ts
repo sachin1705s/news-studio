@@ -1,67 +1,87 @@
 import type { Program } from "./programs";
 import { trimDangling } from "./prompt";
+import type { Strand } from "./strands";
 import type { Segment, Story } from "./types";
 
 /**
- * Turn a pile of wire stories into an ordered rundown for one program block.
+ * Turn wire stories into an ordered rundown for one ten-minute strand.
  *
- * The shape is the one a real bulletin uses: a program open, then story
- * packages in blocks of three separated by a station bumper, and a sign-off at
- * the end of the wheel. Each item becomes exactly one FastH3 clip.
+ * Stories that carry a summary and a shot description run as a package, the way
+ * a real bulletin does it: the anchor reads the intro to camera, then the
+ * pictures take over while their voice continues underneath. Stories without
+ * both stay as a straight anchor read rather than cutting to invented footage.
  */
 const STORIES_PER_BLOCK = 3;
 
-export function buildRundown(stories: Story[], program: Program, cycle: number): Segment[] {
+export function buildRundown(
+  stories: Story[],
+  program: Program,
+  strand: Strand,
+  cycle: number,
+  shots: Map<string, string>,
+): Segment[] {
   const segments: Segment[] = [];
-  const key = (n: string) => `${program.id}-${cycle}-${n}`;
+  const key = (n: string) => `${program.id}-${strand.id}-${cycle}-${n}`;
+  const base = { programId: program.id, strandId: strand.id };
 
   segments.push({
+    ...base,
     id: key("open"),
     kind: "open",
-    slug: program.name.toUpperCase(),
+    slug: strand.name.toUpperCase(),
     strap: program.strap,
-    programId: program.id,
-    script: openLine(program, stories[0]),
+    script: `${strand.intro} ${stories[0] ? `${program.leadIn}: ${endSentence(clause(stripTail(stories[0].title), 11))}` : ""}`.trim(),
   });
 
   stories.forEach((story, i) => {
     if (i > 0 && i % STORIES_PER_BLOCK === 0) {
       segments.push({
+        ...base,
         id: key(`bump-${i}`),
         kind: "bumper",
         slug: "COMING UP",
         strap: program.strap,
-        programId: program.id,
         script: bumperLine(stories.slice(i, i + STORIES_PER_BLOCK)),
       });
     }
+
+    const shot = shots.get(story.id);
+    const detail = story.summary ? endSentence(firstSentence(story.summary)) : undefined;
+
     segments.push({
+      ...base,
       id: key(`story-${i}`),
       kind: "story",
       slug: story.title,
       strap: `${story.source} · ${relative(story.publishedAt)}`,
       story,
-      programId: program.id,
       script: storyLine(story, i === 0),
-      detail: story.summary ? endSentence(firstSentence(story.summary)) : undefined,
+      // The context sentence moves to the b-roll when there is one to move it to.
+      detail: shot && detail ? undefined : detail,
     });
-  });
 
-  segments.push({
-    id: key("signoff"),
-    kind: "signoff",
-    slug: program.name.toUpperCase(),
-    strap: "Coverage continues",
-    programId: program.id,
-    script: `That is the latest from the newsroom. ${program.name} continues after this.`,
+    if (shot && detail) {
+      segments.push({
+        ...base,
+        id: key(`broll-${i}`),
+        kind: "broll",
+        slug: story.title,
+        strap: `${story.source} · ${relative(story.publishedAt)}`,
+        story,
+        shot,
+        script: detail,
+      });
+    }
   });
 
   return segments;
 }
 
-function openLine(program: Program, lead?: Story): string {
-  const hook = lead ? ` ${program.leadIn}: ${endSentence(clause(stripTail(lead.title), 11))}` : "";
-  return `Live from the newsroom, this is ${program.name}.${hook}`;
+/** Headlines the b-roll writer needs, paired back by story id. */
+export function headlinesFor(stories: Story[]): { id: string; text: string }[] {
+  return stories
+    .filter((s) => s.summary)
+    .map((s) => ({ id: s.id, text: stripTail(s.title) }));
 }
 
 function storyLine(story: Story, isLead: boolean): string {

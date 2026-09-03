@@ -35,4 +35,10 @@ export const FEEDS: Record<Category, { url: string; source: string }[]> = {
   culture: [
     { url: "https://www.theguardian.com/uk/culture/rss", source: "Guardian Culture" },
   ],
+  television: [
+    { url: "https://variety.com/v/tv/feed/", source: "Variety" },
+    { url: "https://deadline.com/v/tv/feed/", source: "Deadline" },
+    { url: "https://www.hollywoodreporter.com/c/tv/feed/", source: "Hollywood Reporter" },
+    { url: "https://feeds.bbci.co.uk/news/entertainment_and_arts/rss.xml", source: "BBC Entertainment" },
+  ],
 };

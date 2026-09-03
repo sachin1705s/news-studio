@@ -5,7 +5,8 @@ export type Category =
   | "technology"
   | "science"
   | "sport"
-  | "culture";
+  | "culture"
+  | "television";
 
 export interface Story {
   id: string;
@@ -18,7 +19,7 @@ export interface Story {
 }
 
 /** A single item on the rundown. One segment builds exactly one FastH3 clip. */
-export type SegmentKind = "open" | "story" | "bumper" | "signoff";
+export type SegmentKind = "open" | "story" | "broll" | "bumper" | "signoff";
 
 export interface Segment {
   id: string;
@@ -33,6 +34,9 @@ export interface Segment {
   strap: string;
   story?: Story;
   programId: string;
+  strandId: string;
+  /** For a b-roll segment: what the footage shows. Written by Claude from the headline. */
+  shot?: string;
 }
 
 /** Lifecycle of a segment as it moves through the model's two queues. */

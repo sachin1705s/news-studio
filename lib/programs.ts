@@ -14,6 +14,8 @@ export interface Program {
   bed: string;
   /** Strap line under the lower third. */
   strap: string;
+  /** Ten-minute strands this daypart cycles through, in order. */
+  strands: string[];
   /** How the program open introduces its lead story at this hour. */
   leadIn: string;
   accent: string;
@@ -26,6 +28,7 @@ export interface Program {
 export const SCHEDULE: Program[] = [
   {
     id: "overnight",
+    strands: ["bulletin", "feed", "screen"],
     leadIn: "Overnight",
     name: "Overnight Wire",
     startHour: 0,
@@ -38,6 +41,7 @@ export const SCHEDULE: Program[] = [
   },
   {
     id: "morning",
+    strands: ["bulletin", "markets", "screen"],
     leadIn: "This morning",
     name: "Morning Brief",
     startHour: 5,
@@ -50,6 +54,7 @@ export const SCHEDULE: Program[] = [
   },
   {
     id: "markets",
+    strands: ["markets", "bulletin", "feed"],
     leadIn: "At the open",
     name: "Markets Open",
     startHour: 9,
@@ -62,6 +67,7 @@ export const SCHEDULE: Program[] = [
   },
   {
     id: "midday",
+    strands: ["bulletin", "screen", "markets", "courtside"],
     leadIn: "Our lead at midday",
     name: "Midday Bulletin",
     startHour: 12,
@@ -74,6 +80,7 @@ export const SCHEDULE: Program[] = [
   },
   {
     id: "thefeed",
+    strands: ["feed", "screen", "bulletin"],
     leadIn: "Today",
     name: "The Feed",
     startHour: 14,
@@ -86,6 +93,7 @@ export const SCHEDULE: Program[] = [
   },
   {
     id: "evening",
+    strands: ["bulletin", "markets", "screen", "courtside"],
     leadIn: "Tonight",
     name: "Evening Edition",
     startHour: 17,
@@ -98,6 +106,7 @@ export const SCHEDULE: Program[] = [
   },
   {
     id: "crosstalk",
+    strands: ["screen", "courtside", "bulletin"],
     leadIn: "Tonight",
     name: "The Crosstalk",
     startHour: 20,
@@ -110,6 +119,7 @@ export const SCHEDULE: Program[] = [
   },
   {
     id: "nightdesk",
+    strands: ["bulletin", "feed", "screen"],
     leadIn: "Tonight",
     name: "Night Desk",
     startHour: 22,
