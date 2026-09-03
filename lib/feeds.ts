@@ -35,6 +35,13 @@ export const FEEDS: Record<Category, { url: string; source: string }[]> = {
   culture: [
     { url: "https://www.theguardian.com/uk/culture/rss", source: "Guardian Culture" },
   ],
+  startups: [
+    { url: "https://techcrunch.com/category/startups/feed/", source: "TechCrunch" },
+    { url: "https://sifted.eu/feed", source: "Sifted" },
+    { url: "https://feeds.bloomberg.com/technology/news.rss", source: "Bloomberg Tech" },
+    { url: "https://www.eu-startups.com/feed/", source: "EU-Startups" },
+    { url: "https://venturebeat.com/feed/", source: "VentureBeat" },
+  ],
   television: [
     { url: "https://variety.com/v/tv/feed/", source: "Variety" },
     { url: "https://deadline.com/v/tv/feed/", source: "Deadline" },

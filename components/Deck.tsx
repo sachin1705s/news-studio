@@ -12,22 +12,40 @@ import {
   useFastH3CommandError,
   useFastH3StateUpdate,
 } from "@reactor-models/fast-h3";
+import type { ProducedItem } from "@/lib/newsroom";
 import type { Program } from "@/lib/programs";
-import { buildPrompt } from "@/lib/prompt";
+import { buildPrompt, clipSecondsFor } from "@/lib/prompt";
 import { buildRundown, headlinesFor } from "@/lib/rundown";
-import { STRANDS, strandAt } from "@/lib/strands";
+import { markPinnedRun, nextCycle, shouldRunPinned } from "@/lib/history";
+import { PINNED_LEAD } from "@/lib/pinned";
+import { openingActive, strandOnAir, type Strand } from "@/lib/strands";
 import { stockShot } from "@/lib/stock-shots";
 import type { Segment, Story } from "@/lib/types";
+
+/** A comment the anchor is going to answer, with the answer already written. */
+export interface ViewerTake {
+  id: string;
+  author: string;
+  text: string;
+  reply: string;
+}
 
 /** Metadata rides with every clip and comes back on every message about it, so
  *  the on-screen chrome is driven by the picture rather than by a parallel timer. */
 export interface ClipMeta {
+  /** The segment this clip was built from, so the rundown can retire it on air. */
+  id: string;
   slug: string;
   strap: string;
   kind: Segment["kind"];
   program: string;
   strand: string;
   kicker: string;
+  /** Set on correspondent clips: goes on the LIVE super. */
+  location?: string;
+  breaking?: boolean;
+  /** Set on viewer clips: who is being quoted. */
+  author?: string;
 }
 
 export interface DeckStats {
@@ -42,8 +60,15 @@ export interface DeckStats {
 interface DeckProps {
   program: Program;
   anchorStill: Blob | null;
-  /** Story ids already broadcast, shared across decks so a rotation doesn't repeat itself. */
-  usedStoryIds: React.MutableRefObject<Set<string>>;
+  /**
+   * When each story was last broadcast, shared across decks so a rotation does
+   * not repeat itself and a long run does not come back round to this morning.
+   */
+  usedStoryIds: React.MutableRefObject<Map<string, number>>;
+  /** When the opening block ends. Before it, the channel is on the startup desk. */
+  openingUntil: number | null;
+  /** Hands over the next viewer comment, or null when there is nothing to answer. */
+  takeComment: (coverage: string[]) => Promise<ViewerTake | null>;
   onPictureLive: () => void;
   /** The session ended — expired, evicted, or dropped. The channel needs a new one. */
   onSessionLost: () => void;
@@ -85,10 +110,77 @@ export function Deck(props: DeckProps) {
 
 /** A bulletin read lands ~20 words; the model clamps this to what it can build. */
 const TARGET_CLIP_SECONDS = 12;
+
+/**
+ * How long a story stays retired.
+ *
+ * A channel running for hours will exhaust any single feed, and the honest
+ * options are then to repeat or to widen. It does both, in that order: it
+ * widens the wire first, and only lets a story back on air after six hours,
+ * by which point it is a different bulletin covering a story again rather than
+ * the same bulletin stuck in a loop.
+ */
+const RETIRE_MS = 6 * 60 * 60 * 1000;
+
+/**
+ * Crop a publisher's photograph to the canvas shape.
+ *
+ * A starting frame has to match the session's aspect or the model letterboxes
+ * it into the shot. Press pictures are every shape there is, so each one is
+ * centre-cropped to 16:9 before it goes up.
+ */
+async function to16x9(blob: Blob): Promise<Blob | null> {
+  try {
+    const bitmap = await createImageBitmap(blob);
+    const W = 1280;
+    const H = 720;
+    const canvas = document.createElement("canvas");
+    canvas.width = W;
+    canvas.height = H;
+    const ctx = canvas.getContext("2d");
+    if (!ctx) return null;
+
+    const scale = Math.max(W / bitmap.width, H / bitmap.height);
+    const w = bitmap.width * scale;
+    const h = bitmap.height * scale;
+    ctx.drawImage(bitmap, (W - w) / 2, (H - h) / 2, w, h);
+    bitmap.close();
+
+    return await new Promise((resolve) =>
+      canvas.toBlob((out) => resolve(out), "image/jpeg", 0.9),
+    );
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Deal the block out in no particular order.
+ *
+ * Seeded on the cycle so one refill is stable — a re-render must not reorder a
+ * rundown that is already being queued — while consecutive blocks land
+ * differently.
+ */
+function shuffle<T>(items: T[], seed: number): T[] {
+  const out = [...items];
+  let state = (seed + 1) * 2654435761;
+  const next = () => {
+    state = (state * 1664525 + 1013904223) >>> 0;
+    return state / 0x100000000;
+  };
+  for (let i = out.length - 1; i > 0; i--) {
+    const j = Math.floor(next() * (i + 1));
+    [out[i], out[j]] = [out[j], out[i]];
+  }
+  return out;
+}
+
 function DeckInner({
   program,
   anchorStill,
   usedStoryIds,
+  openingUntil,
+  takeComment,
   onPictureLive,
   onSessionLost,
   onSegment,
@@ -108,12 +200,44 @@ function DeckInner({
   const clipSeconds = useRef(TARGET_CLIP_SECONDS);
   const still = useRef<FileRef | null>(null);
   const pending = useRef<Segment[]>([]);
+  /**
+   * The block as written, kept whole.
+   *
+   * The rail shows what is still to come, and "still to come" is not the same
+   * as "not yet queued": with twenty slots free the deck queues an entire block
+   * in one pass, which used to leave the rail reading "waiting on the wire"
+   * while twenty clips were building. Segments are retired from here when they
+   * reach air instead.
+   */
+  const block = useRef<Segment[]>([]);
+  /** Headlines already broadcast this session, for answering viewers in context. */
+  const coverage = useRef<string[]>([]);
   const cycle = useRef(0);
   const feeding = useRef(false);
+  /**
+   * A number that is different every time the channel starts.
+   *
+   * Without it the shuffle is seeded on the cycle counter, which begins at zero
+   * on every page load — so every run dealt the same story list into the same
+   * order and opened on the same headline, which looked exactly like hardcoded
+   * news. The wire cache made it worse: within its four-minute window the list
+   * was identical too. This is what makes two runs a minute apart differ.
+   */
+  const runSeed = useRef(0);
   const sawPicture = useRef(false);
-  const brollWarned = useRef(false);
+  const producerWarned = useRef(false);
   const reportedLoss = useRef(false);
   const capacity = useRef({ free: 0 });
+  /** Uploaded press photographs, keyed by story id: one upload per story, not per clip. */
+  const frames = useRef<Map<string, FileRef | null>>(new Map());
+
+  // Seeded in an effect so the value never differs between server and client.
+  useEffect(() => {
+    runSeed.current = Math.floor(Math.random() * 1_000_000);
+    // Carry on from the last block this browser saw rather than restarting at
+    // zero, so a refresh advances the running order instead of repeating it.
+    cycle.current = nextCycle();
+  }, []);
 
   /**
    * Configure the session once the GPU is assigned.
@@ -122,11 +246,6 @@ function DeckInner({
    * as one: its answer is the `state_update` broadcast, which reaches every
    * client rather than the caller, so `sendCommand` has no caller-scoped reply
    * to resolve and hands back `undefined` no matter how ready the session is.
-   *
-   * The same broadcast is where the session's real limits come from, and it is
-   * emitted on connect, so by the time status flips to ready it has normally
-   * already landed. If it has not, one `get_state` asks for it again and this
-   * effect re-runs when it arrives.
    */
   useEffect(() => {
     if (status !== "ready" || configured || configuring.current) return;
@@ -188,65 +307,215 @@ function DeckInner({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [status, stateArrived, configured]);
 
+  /**
+   * Gather the block's stories.
+   *
+   * RSS is the wire and covers most subjects well. The startup desk is the one
+   * block it covers badly — funding rounds and acquisitions reach the feeds
+   * late or never — so that block also asks the grounded live desk, and runs
+   * those items first because they are the freshest thing the channel has.
+   */
+  const gather = useCallback(
+    async (strand: Strand, widen: boolean, angle: string): Promise<Story[]> => {
+      // Widening pulls the neighbouring desks in rather than going quiet: a
+      // startup block short of startup news is still a technology block.
+      const categories = widen
+        ? Array.from(new Set([...strand.categories, ...program.categories, "top", "world"]))
+        : strand.categories;
+      const params = new URLSearchParams({ categories: categories.join(",") });
+      const res = await fetch(`/api/news?${params}`, { cache: "no-store" });
+      if (!res.ok) throw new Error(`News fetch failed (${res.status})`);
+      const { stories } = (await res.json()) as { stories: Story[] };
+
+      // Every block searches the web. RSS is fast and reliable but it is only
+      // as current as its publishers' feeds; a grounded search is what makes
+      // the channel's claim to be live true rather than decorative.
+      let live: Story[] = [];
+      try {
+        const wire = await fetch(`/api/wire?subject=${encodeURIComponent(angle)}`, {
+          cache: "no-store",
+        });
+        if (wire.ok) {
+          const body = (await wire.json()) as { stories?: Story[] };
+          live = body.stories ?? [];
+        }
+      } catch {
+        // Search failing is not worth taking the bulletin off air: the RSS wire
+        // has already delivered a full block on its own.
+      }
+
+      const seen = new Set<string>();
+      const all = [...live, ...stories].filter((s) => {
+        if (seen.has(s.id)) return false;
+        seen.add(s.id);
+        return true;
+      });
+
+      // Shuffled, not ranked. Sorted by recency the block leads with whichever
+      // wire published last and the live desk's funding rounds take every top
+      // slot, so the channel reads as a funding feed with news attached. A
+      // bulletin should feel like a bulletin: a raise, then a court ruling,
+      // then a launch, in no particular order.
+      return shuffle(all, runSeed.current + cycle.current);
+    },
+    [program.categories],
+  );
+
   const refill = useCallback(async () => {
-    // The strand is read fresh each refill, so a block boundary changes what
-    // the channel covers on the next batch without interrupting what is on air.
-    const { strand } = strandAt(new Date());
+    // Read fresh each refill, so a block boundary changes what the channel
+    // covers on the next batch without interrupting what is on air.
+    const { strand } = strandOnAir(openingUntil, new Date());
 
-    const params = new URLSearchParams({ categories: strand.categories.join(",") });
-    const res = await fetch(`/api/news?${params}`, { cache: "no-store" });
-    if (!res.ok) throw new Error(`News fetch failed (${res.status})`);
-    const { stories } = (await res.json()) as { stories: Story[] };
+    const angles = strand.searchAngles;
+    const angle = angles[(runSeed.current + cycle.current) % angles.length];
 
-    // Prefer stories this channel has not run yet; fall back to the full list
-    // once the wire has been exhausted rather than going silent.
-    const fresh = stories.filter((s) => !usedStoryIds.current.has(s.id));
-    const pool = (fresh.length >= 4 ? fresh : stories).slice(0, 8);
-    pool.forEach((s) => usedStoryIds.current.add(s.id));
-    if (usedStoryIds.current.size > 400) usedStoryIds.current.clear();
+    // Let go of anything retired long enough to run again. The map is pruned
+    // here rather than capped by size, so memory tracks time on air instead of
+    // a story count that a busy hour would blow through.
+    const now = Date.now();
+    for (const [id, at] of usedStoryIds.current) {
+      if (now - at > RETIRE_MS) usedStoryIds.current.delete(id);
+    }
 
-    // Every story with a summary gets footage. The library is the floor, so the
-    // channel always cuts away; Claude overwrites it with a shot written for the
-    // actual headline whenever a key is configured and the call succeeds.
-    const wanted = headlinesFor(pool);
-    const shots = new Map<string, string>();
-    wanted.forEach((w, i) => {
-      const shot = stockShot(pool.find((p) => p.id === w.id)!, strand.id, i);
-      if (shot) shots.set(w.id, shot);
+    let all = await gather(strand, false, angle);
+    let fresh = all.filter((s) => !usedStoryIds.current.has(s.id));
+
+    // The strand's own feeds are spent. Widen to the neighbouring desks before
+    // considering anything already broadcast.
+    if (fresh.length < 4) {
+      all = await gather(strand, true, angle);
+      fresh = all.filter((s) => !usedStoryIds.current.has(s.id));
+    }
+
+    // Still short: run the least recently broadcast stories rather than go
+    // silent, oldest first, so a repeat is the furthest thing from what just aired.
+    const stale = all
+      .filter((s) => usedStoryIds.current.has(s.id))
+      .sort((a, b) => (usedStoryIds.current.get(a.id) ?? 0) - (usedStoryIds.current.get(b.id) ?? 0));
+    const pool = [...fresh, ...stale].slice(0, 8);
+
+    // The channel introduces itself first, and only to someone who has not been
+    // watching recently — pinned ahead of the shuffle so it genuinely leads,
+    // rather than being dealt into the middle of the block.
+    if (openingActive(openingUntil) && shouldRunPinned()) {
+      markPinnedRun();
+      pool.unshift(PINNED_LEAD);
+      pool.length = Math.min(pool.length, 8);
+    }
+
+    pool.forEach((s) => usedStoryIds.current.set(s.id, now));
+
+    // The library is the floor: every story gets footage even with no producer
+    // reachable, so the channel always cuts away.
+    const produced = new Map<string, ProducedItem>();
+    const writeable = headlinesFor(pool);
+    writeable.forEach((story, i) => {
+      const shot = stockShot(story, strand.id, i);
+      if (shot) produced.set(story.id, { id: story.id, shot });
     });
 
-    if (wanted.length) {
+    if (writeable.length) {
       try {
-        const shotRes = await fetch("/api/broll", {
+        const res = await fetch("/api/newsroom", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
-            headlines: wanted.map((w) => w.text),
+            stories: writeable.map((s) => ({
+              id: s.id,
+              title: s.title,
+              summary: s.summary,
+              source: s.source,
+            })),
             lookFor: strand.lookFor,
+            tone: program.tone,
+            // Roughly one story in three goes to a correspondent. More than
+            // that and the format stops meaning anything.
+            reporterBudget: Math.max(1, Math.round(writeable.length / 3)),
+            // One story a block gets the three-minute treatment. More than
+            // that and the block stops being a bulletin.
+            longBudget: 1,
           }),
         });
-        const body = (await shotRes.json()) as { shots?: string[]; error?: string };
-        if (shotRes.ok) {
-          (body.shots ?? []).forEach((shot, i) => {
-            const target = wanted[i];
-            if (target && shot?.trim()) shots.set(target.id, shot.trim());
+        const body = (await res.json()) as { items?: ProducedItem[]; error?: string };
+        if (res.ok) {
+          (body.items ?? []).forEach((item) => {
+            if (!item?.id) return;
+            const floor = produced.get(item.id);
+            produced.set(item.id, { ...floor, ...item, shot: item.shot || floor?.shot });
           });
-        } else if (!brollWarned.current) {
-          brollWarned.current = true;
-          // Not a failure of the broadcast — say what the viewer is getting instead.
-          onError(`${body.error ?? "Shot lookup failed."} Using library footage.`);
+        } else if (!producerWarned.current) {
+          producerWarned.current = true;
+          onError(`${body.error ?? "The producer failed."} Running on wire copy and library footage.`);
         }
       } catch {
-        if (!brollWarned.current) {
-          brollWarned.current = true;
-          onError("Shot lookup unreachable. Using library footage.");
+        if (!producerWarned.current) {
+          producerWarned.current = true;
+          onError("The producer is unreachable. Running on wire copy and library footage.");
         }
       }
     }
 
-    pending.current = buildRundown(pool, program, strand, cycle.current++, shots);
-    onQueuePreview(pending.current.slice(0, 8));
-  }, [program, usedStoryIds, onQueuePreview, onError]);
+    const rundown = buildRundown(pool, program, strand, cycle.current++, produced);
+
+    // Viewer mail runs at most once a block, after the first story, so the
+    // channel acknowledges its audience without becoming a comments feed. The
+    // anchor answers rather than recites: the reply is written against what has
+    // actually been broadcast, and a comment with no answer worth making is
+    // never queued at all.
+    const take = await takeComment(coverage.current.slice(-12));
+    if (take) {
+      const at = rundown.findIndex((s) => s.kind === "story");
+      if (at >= 0) {
+        rundown.splice(at + 1, 0, {
+          programId: program.id,
+          strandId: strand.id,
+          id: `${program.id}-${strand.id}-${cycle.current}-viewer-${take.id}`,
+          kind: "viewer",
+          slug: `${take.author} writes`,
+          strap: "From the R24 community",
+          author: take.author,
+          script: `${take.author} writes: ${take.text} ${take.reply}`,
+        });
+      }
+    }
+
+    pending.current = rundown;
+    block.current = rundown;
+    onQueuePreview(block.current.slice(0, 12));
+  }, [gather, onQueuePreview, onError, openingUntil, program, takeComment, usedStoryIds]);
+
+  /**
+   * The picture a cutaway starts from.
+   *
+   * When the publisher ran a photograph with the story, the cutaway begins on
+   * it and moves — which puts the actual company, building or person on screen
+   * rather than a generic library shot of the world they live in. One upload
+   * per story, reused across the clips in its package.
+   */
+  const frameFor = useCallback(
+    async (story: Story | undefined): Promise<FileRef | null> => {
+      if (!story) return null;
+      const source = story.image || story.link;
+      if (!source) return null;
+      if (frames.current.has(story.id)) return frames.current.get(story.id) ?? null;
+
+      // Claim the slot first so two clips in one package do not both upload.
+      frames.current.set(story.id, null);
+      try {
+        const res = await fetch(`/api/image?url=${encodeURIComponent(source)}`);
+        if (!res.ok) return null;
+        const raw = await res.blob();
+        const shaped = await to16x9(raw);
+        if (!shaped) return null;
+        const ref = await uploadFile(shaped, { name: "story.jpg" });
+        frames.current.set(story.id, ref);
+        return ref;
+      } catch {
+        return null;
+      }
+    },
+    [uploadFile],
+  );
 
   /** Keep the generation queue as full as the model will allow. */
   const topUp = useCallback(async () => {
@@ -258,34 +527,46 @@ function DeckInner({
         const segment = pending.current.shift();
         if (!segment) break;
 
-        const strand = STRANDS[segment.strandId] ?? strandAt(new Date()).strand;
+        const strand = strandOnAir(openingUntil, new Date()).strand;
         const meta: ClipMeta = {
+          id: segment.id,
           slug: segment.slug,
           strap: segment.strap,
           kind: segment.kind,
           program: program.name,
           strand: strand.name,
           kicker: strand.kicker,
+          location: segment.location,
+          breaking: segment.breaking,
+          author: segment.author,
         };
 
-        // The anchor still opens anchor shots only. A cutaway is a different
-        // scene entirely, so seeding it from the studio frame would fight the shot.
-        const useStill = still.current && segment.kind !== "broll";
+        // The anchor still opens anchor shots only. A cutaway and a reporter
+        // standup are different scenes entirely, so seeding either from the
+        // studio frame would fight the shot.
+        const inStudio = segment.kind !== "broll" && segment.kind !== "reporter";
+        const startingFrame = inStudio
+          ? still.current
+          : segment.kind === "broll"
+            ? await frameFor(segment.story)
+            : null;
+
+        const seconds = clipSecondsFor(segment, clipSeconds.current);
 
         await enqueue({
-          prompt: buildPrompt(segment, program, clipSeconds.current, !!still.current),
+          prompt: buildPrompt(segment, program, seconds, inStudio && !!still.current),
+          seconds,
           metadata: JSON.stringify(meta),
-          ...(useStill ? { starting_frame: still.current } : {}),
+          ...(startingFrame ? { starting_frame: startingFrame } : {}),
         });
         capacity.current.free -= 1;
-        onQueuePreview(pending.current.slice(0, 8));
       }
     } catch (err) {
       onError(err instanceof Error ? err.message : "Failed to queue a segment.");
     } finally {
       feeding.current = false;
     }
-  }, [configured, enqueue, onError, onQueuePreview, program, refill]);
+  }, [configured, enqueue, frameFor, onError, openingUntil, program, refill]);
 
   useFastH3StateUpdate((state) => {
     sessionState.current = state;
@@ -310,15 +591,15 @@ function DeckInner({
     return () => clearInterval(id);
   }, [configured, topUp]);
 
+  useEffect(() => {
+    console.debug(`[deck] status: ${status}`);
+  }, [status]);
+
   /**
    * A session that has been up and then reports disconnected is gone: the SDK
    * reconnects a recoverable drop on its own, so reaching this state means it
    * could not. Reported once — the parent tears this deck down in response.
    */
-  useEffect(() => {
-    console.debug(`[deck] status: ${status}`);
-  }, [status]);
-
   useEffect(() => {
     if (!configured || reportedLoss.current) return;
     if (status === "disconnected") {
@@ -333,7 +614,19 @@ function DeckInner({
       onPictureLive();
     }
     const meta = parseMeta(message.clip.metadata);
-    if (meta) onSegment(meta);
+    if (!meta) return;
+    onSegment(meta);
+
+    // Everything up to and including this segment has now been on air.
+    const at = block.current.findIndex((s) => s.id === meta.id);
+    if (at >= 0) {
+      block.current = block.current.slice(at + 1);
+      onQueuePreview(block.current.slice(0, 12));
+    }
+    if (meta.kind === "story") {
+      coverage.current.push(meta.slug);
+      if (coverage.current.length > 40) coverage.current.shift();
+    }
   });
 
   useFastH3ClipFailed((message) => {

@@ -28,7 +28,7 @@ export interface Program {
 export const SCHEDULE: Program[] = [
   {
     id: "overnight",
-    strands: ["bulletin", "feed", "screen"],
+    strands: ["bulletin", "feed", "startups", "screen"],
     leadIn: "Overnight",
     name: "Overnight Wire",
     startHour: 0,
@@ -41,7 +41,7 @@ export const SCHEDULE: Program[] = [
   },
   {
     id: "morning",
-    strands: ["bulletin", "markets", "screen"],
+    strands: ["bulletin", "startups", "markets", "screen"],
     leadIn: "This morning",
     name: "Morning Brief",
     startHour: 5,
@@ -54,7 +54,7 @@ export const SCHEDULE: Program[] = [
   },
   {
     id: "markets",
-    strands: ["markets", "bulletin", "feed"],
+    strands: ["markets", "startups", "bulletin", "feed"],
     leadIn: "At the open",
     name: "Markets Open",
     startHour: 9,
@@ -80,7 +80,7 @@ export const SCHEDULE: Program[] = [
   },
   {
     id: "thefeed",
-    strands: ["feed", "screen", "bulletin"],
+    strands: ["feed", "startups", "screen", "bulletin"],
     leadIn: "Today",
     name: "The Feed",
     startHour: 14,

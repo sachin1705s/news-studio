@@ -20,9 +20,35 @@ export interface Strand {
   intro: string;
   /** Steers the footage: what this subject tends to look like. */
   lookFor: string;
+  /**
+   * What the live desk searches the web for during this block, one angle per
+   * refill. Asking the same question every time returns the same answers, so
+   * each strand carries several and rotates through them.
+   */
+  searchAngles: string[];
 }
 
 export const STRANDS: Record<string, Strand> = {
+  startups: {
+    id: "startups",
+    name: "Startup Desk",
+    // Deliberately wide. A desk that only pulls startup feeds becomes a
+    // funding wire; the block should carry a raise, a policy story and a
+    // launch side by side.
+    categories: ["startups", "technology", "business", "science"],
+    kicker: "STARTUPS",
+    intro: "This is R24. Now, the startup desk.",
+    lookFor:
+      "founders and operators at work — small offices, warehouses, workshops, laptops on shared desks, city business districts",
+    searchAngles: [
+      "startup funding rounds and new raises announced today",
+      "startup acquisitions, exits and IPO filings this week",
+      "AI product launches from startups",
+      "venture capital fund closes and new funds",
+      "startup shutdowns, layoffs and down rounds",
+      "founder moves and notable hires at technology companies",
+    ],
+  },
   bulletin: {
     id: "bulletin",
     name: "Bulletin",
@@ -30,6 +56,12 @@ export const STRANDS: Record<string, Strand> = {
     kicker: "BREAKING",
     intro: "Now, the headlines.",
     lookFor: "news actuality — streets, buildings, crowds, officials at podiums",
+    searchAngles: [
+      "top world news headlines today",
+      "breaking international news in the last few hours",
+      "major political developments today",
+      "government policy announcements today",
+    ],
   },
   screen: {
     id: "screen",
@@ -38,6 +70,12 @@ export const STRANDS: Record<string, Strand> = {
     kicker: "SCREEN DESK",
     intro: "Now to the Screen Desk, and what people are watching.",
     lookFor: "production and premiere imagery — sets, red carpets, screens, studio backlots",
+    searchAngles: [
+      "television and streaming news, renewals and cancellations",
+      "film and series premieres announced this week",
+      "box office and streaming viewership news",
+      "casting and production news in film and television",
+    ],
   },
   markets: {
     id: "markets",
@@ -46,6 +84,12 @@ export const STRANDS: Record<string, Strand> = {
     kicker: "MARKETS",
     intro: "To the markets now.",
     lookFor: "trading floors, tickers, logistics, storefronts, factory lines",
+    searchAngles: [
+      "stock market moves and index performance today",
+      "company earnings reported today",
+      "central bank and interest rate news",
+      "commodity and currency market news today",
+    ],
   },
   feed: {
     id: "feed",
@@ -54,6 +98,12 @@ export const STRANDS: Record<string, Strand> = {
     kicker: "THE FEED",
     intro: "And now, technology.",
     lookFor: "hardware, labs, data centres, devices in real use",
+    searchAngles: [
+      "artificial intelligence research and model releases",
+      "consumer technology product launches this week",
+      "science research findings published this week",
+      "space missions and astronomy news",
+    ],
   },
   courtside: {
     id: "courtside",
@@ -62,8 +112,43 @@ export const STRANDS: Record<string, Strand> = {
     kicker: "SPORT",
     intro: "Now the sport.",
     lookFor: "stadiums, arenas, training grounds, crowds",
+    searchAngles: [
+      "sports results from today",
+      "football transfer news and signings",
+      "major tournament and championship news",
+      "athlete injury and squad news today",
+    ],
   },
 };
+
+/**
+ * The block the channel opens on, whatever the clock says.
+ *
+ * A rolling channel joined mid-block starts the viewer in the middle of a
+ * subject they did not choose. Opening on the startup desk gives the channel a
+ * front door: the first block after take-air is always startups and technology,
+ * and the clock wheel resumes from the block after it.
+ *
+ * It is a window rather than a flag that the first refill consumes. The deck
+ * and the on-screen schedule both have to agree about what is on air for the
+ * whole ten minutes, and a flag cleared by whichever of them read it first
+ * left the two disagreeing for the rest of the block.
+ */
+export const OPENING_STRAND = "startups";
+
+/** Whether the opening block is still running at this instant. */
+export function openingActive(openingUntil: number | null, now = Date.now()): boolean {
+  return openingUntil !== null && now < openingUntil;
+}
+
+/** The block on air, honouring the opening window before the clock wheel. */
+export function strandOnAir(openingUntil: number | null, now = new Date()) {
+  const scheduled = strandAt(now);
+  if (openingActive(openingUntil, now.getTime())) {
+    return { ...scheduled, strand: STRANDS[OPENING_STRAND] ?? scheduled.strand };
+  }
+  return scheduled;
+}
 
 /** Which strand is on air at a given instant, and the block it belongs to. */
 export function strandAt(now: Date): {
@@ -75,7 +160,7 @@ export function strandAt(now: Date): {
   const program = programAt(now);
   const block = Math.floor((now.getHours() * 60 + now.getMinutes()) / STRAND_MINUTES);
   const rotation = program.strands;
-  const strand = STRANDS[rotation[block % rotation.length]];
+  const strand = STRANDS[rotation[block % rotation.length]] ?? STRANDS.bulletin;
 
   const startsAt = new Date(now);
   startsAt.setHours(0, block * STRAND_MINUTES, 0, 0);

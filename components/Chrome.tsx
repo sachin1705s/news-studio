@@ -1,11 +1,10 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useState } from "react";
 import type { Program } from "@/lib/programs";
-import { upcomingStrands, STRAND_MINUTES } from "@/lib/strands";
-import { stripTail } from "@/lib/rundown";
-import type { Segment } from "@/lib/types";
-import type { ClipMeta, DeckStats } from "./Deck";
+import { relative, stripTail } from "@/lib/rundown";
+import type { Comment, Segment } from "@/lib/types";
+import type { ClipMeta } from "./Deck";
 
 export function Clock() {
   const [now, setNow] = useState<Date | null>(null);
@@ -37,24 +36,69 @@ export function ChannelBug({ program, onAir }: { program: Program; onAir: boolea
   );
 }
 
+/**
+ * The lower third.
+ *
+ * Four states, because four kinds of clip go to air. A studio read carries the
+ * strand's kicker and the headline. A cutaway keeps them up so the story does
+ * not lose its label when the anchor leaves the screen. A correspondent gets
+ * the red LIVE flag and where they are standing, which is the whole point of
+ * sending them. Viewer mail is credited to whoever wrote it.
+ */
 export function LowerThird({ meta, program }: { meta: ClipMeta | null; program: Program }) {
   if (!meta) return null;
+
+  if (meta.kind === "reporter") {
+    return (
+      <div className="lower-third is-reporter" key={meta.slug}>
+        <div className="lt-row">
+          <div className="lt-kicker is-live">
+            <span className="dot" />
+            LIVE
+          </div>
+          <div className="lt-body">
+            <div className="lt-slug">{stripTail(meta.slug)}</div>
+            <div className="lt-strap">{meta.location ?? "On location"}</div>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  if (meta.kind === "viewer") {
+    return (
+      <div className="lower-third is-viewer" key={meta.slug}>
+        <div className="lt-row">
+          <div className="lt-kicker" style={{ background: program.accent }}>
+            YOUR VIEW
+          </div>
+          <div className="lt-body">
+            <div className="lt-slug">{meta.author ?? "A viewer"} writes</div>
+            <div className="lt-strap">{meta.strap}</div>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
   const kicker =
     meta.kind === "bumper"
       ? "COMING UP"
-      : meta.kind === "broll"
+      : meta.kind === "story" || meta.kind === "broll"
         ? meta.kicker
-        : meta.kind === "story"
-          ? meta.kicker
-          : meta.strand.toUpperCase();
+        : meta.strand.toUpperCase();
+
   return (
     <div className="lower-third" key={meta.slug}>
-      <div className="lt-kicker" style={{ background: program.accent }}>
-        {kicker}
-      </div>
-      <div className="lt-body">
-        <div className="lt-slug">{stripTail(meta.slug)}</div>
-        <div className="lt-strap">{meta.strap}</div>
+      {meta.breaking && <div className="breaking-band">BREAKING NEWS</div>}
+      <div className="lt-row">
+        <div className="lt-kicker" style={{ background: program.accent }}>
+          {kicker}
+        </div>
+        <div className="lt-body">
+          <div className="lt-slug">{stripTail(meta.slug)}</div>
+          <div className="lt-strap">{meta.strap}</div>
+        </div>
       </div>
     </div>
   );
@@ -81,85 +125,16 @@ export function Ticker({ segments }: { segments: Segment[] }) {
   );
 }
 
-export function ScheduleRail({ program }: { program: Program }) {
-  const [rows, setRows] = useState<ReturnType<typeof upcomingStrands>>([]);
-  useEffect(() => {
-    const tick = () => setRows(upcomingStrands(new Date(), 6));
-    tick();
-    // Blocks turn over every ten minutes; a twenty-second tick keeps the rail
-    // honest without re-rendering the whole rail every second.
-    const id = setInterval(tick, 20_000);
-    return () => clearInterval(id);
-  }, [program.id]);
-
-  return (
-    <section className="panel">
-      <h2 className="panel-title">Schedule · {STRAND_MINUTES}-minute blocks</h2>
-      <ol className="sched">
-        {rows.map((row, i) => (
-          <li
-            key={row.startsAt.getTime()}
-            className={i === 0 ? "sched-row is-live" : "sched-row"}
-          >
-            <time className="sched-time">
-              {row.startsAt.toLocaleTimeString([], {
-                hour: "2-digit",
-                minute: "2-digit",
-                hour12: false,
-              })}
-            </time>
-            <div className="sched-body">
-              <div
-                className="sched-name"
-                style={i === 0 ? { color: row.program.accent } : undefined}
-              >
-                {row.strand.name}
-              </div>
-              <div className="sched-strap">{row.program.name}</div>
-            </div>
-            {i === 0 && <span className="sched-flag">ON AIR</span>}
-          </li>
-        ))}
-      </ol>
-    </section>
-  );
-}
-
-export function RundownRail({ segments }: { segments: Segment[] }) {
-  return (
-    <section className="panel">
-      <h2 className="panel-title">Rundown</h2>
-      {segments.length === 0 ? (
-        <p className="panel-empty">Waiting on the wire.</p>
-      ) : (
-        <ol className="rundown">
-          {segments.map((s, i) => (
-            <li key={s.id} className="run-row">
-              <span className="run-index">{String(i + 1).padStart(2, "0")}</span>
-              <div className="run-body">
-                <div className="run-slug">{stripTail(s.slug)}</div>
-                <div className="run-strap">
-                  {s.kind === "broll" ? `FOOTAGE · ${s.shot ? s.shot.slice(0, 48) : ""}` : s.kind === "story" ? s.strap : s.kind.toUpperCase()}
-                </div>
-              </div>
-            </li>
-          ))}
-        </ol>
-      )}
-    </section>
-  );
-}
-
 export function StatusRail({
-  stats,
   airtime,
   rotating,
   errors,
+  transmitMode,
 }: {
-  stats: DeckStats | null;
   airtime: number;
   rotating: boolean;
   errors: string[];
+  transmitMode?: boolean;
 }) {
   const mins = Math.floor(airtime / 60);
   const secs = Math.floor(airtime % 60);
@@ -173,21 +148,10 @@ export function StatusRail({
             {String(mins).padStart(2, "0")}:{String(secs).padStart(2, "0")}
           </dd>
         </div>
-        <div>
-          <dt>Building</dt>
-          <dd>
-            {stats ? `${stats.building}/${stats.buildCapacity}` : "—"}
-          </dd>
-        </div>
-        <div>
-          <dt>Ready</dt>
-          <dd>{stats ? `${stats.ready}/${stats.readyCapacity}` : "—"}</dd>
-        </div>
-        <div>
-          <dt>Segments run</dt>
-          <dd>{stats ? stats.clipsPlayed : "—"}</dd>
-        </div>
       </dl>
+      {transmitMode && (
+        <p className="transmit">Transmission mode · will not pause when unwatched</p>
+      )}
       {rotating && <p className="rotating">Pre-rolling the next session…</p>}
       {errors.length > 0 && (
         <ul className="errors">
@@ -200,51 +164,93 @@ export function StatusRail({
   );
 }
 
-export function AnchorControl({
-  still,
-  onChange,
+/**
+ * The community.
+ *
+ * Comments are the audience's, so they are shown verbatim and credited. The
+ * "read on air" switch is what makes this part of the channel rather than a
+ * chat box beside it: with it on, one comment a block is handed to the anchor.
+ */
+export function CommunityPanel({
+  comments,
+  onAir,
+  onToggleOnAir,
+  onPost,
 }: {
-  still: { blob: Blob; url: string } | null;
-  onChange: (blob: Blob | null) => void;
+  comments: Comment[];
+  onAir: boolean;
+  onToggleOnAir: (next: boolean) => void;
+  onPost: (author: string, text: string) => Promise<string | null>;
 }) {
-  const input = useRef<HTMLInputElement>(null);
+  const [author, setAuthor] = useState("");
+  const [text, setText] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
   return (
     <section className="panel">
-      <h2 className="panel-title">Anchor</h2>
-      <p className="panel-note">
-        Every segment opens from this still, so the same presenter and set carry across the whole
-        broadcast. Without one the anchor is described in words and drifts between segments.
-      </p>
-      <div className="anchor-row">
-        {still ? (
-          // eslint-disable-next-line @next/next/no-img-element
-          <img src={still.url} alt="Anchor still" className="anchor-thumb" />
-        ) : (
-          <div className="anchor-thumb anchor-empty">none</div>
-        )}
-        <div className="anchor-actions">
-          <button type="button" className="btn" onClick={() => input.current?.click()}>
-            {still ? "Replace" : "Load still"}
-          </button>
-          {still && (
-            <button type="button" className="btn btn-quiet" onClick={() => onChange(null)}>
-              Clear
-            </button>
-          )}
-        </div>
+      <div className="panel-head">
+        <h2 className="panel-title">Community</h2>
+        <label className="switch">
+          <input
+            type="checkbox"
+            checked={onAir}
+            onChange={(e) => onToggleOnAir(e.target.checked)}
+          />
+          <span>Read on air</span>
+        </label>
       </div>
-      <input
-        ref={input}
-        type="file"
-        accept="image/*"
-        hidden
-        onChange={(e) => {
-          const file = e.target.files?.[0];
-          if (file) onChange(file);
-          e.target.value = "";
+
+      <form
+        className="comment-form"
+        onSubmit={async (e) => {
+          e.preventDefault();
+          if (!text.trim() || busy) return;
+          setBusy(true);
+          setError(null);
+          const failure = await onPost(author, text);
+          setBusy(false);
+          if (failure) setError(failure);
+          else setText("");
         }}
-      />
-      <p className="panel-note panel-note-dim">Applies at the next session rotation.</p>
+      >
+        <input
+          className="field field-name"
+          value={author}
+          onChange={(e) => setAuthor(e.target.value)}
+          placeholder="Your name"
+          maxLength={32}
+        />
+        <textarea
+          className="field field-text"
+          value={text}
+          onChange={(e) => setText(e.target.value)}
+          placeholder="Say something about what's on air…"
+          maxLength={240}
+          rows={2}
+        />
+        <button type="submit" className="btn btn-primary" disabled={busy || !text.trim()}>
+          {busy ? "Sending…" : "Post"}
+        </button>
+        {error && <p className="comment-error">{error}</p>}
+      </form>
+
+      {comments.length === 0 ? (
+        <p className="panel-empty">No one has said anything yet.</p>
+      ) : (
+        <ul className="comments">
+          {comments.map((c) => (
+            <li key={c.id} className="comment">
+              <div className="comment-head">
+                <span className="comment-author">{c.author}</span>
+                <span className="comment-time">{relative(c.at)}</span>
+                {c.readAt && <span className="comment-read">READ ON AIR</span>}
+              </div>
+              <p className="comment-text">{c.text}</p>
+            </li>
+          ))}
+        </ul>
+      )}
     </section>
   );
 }

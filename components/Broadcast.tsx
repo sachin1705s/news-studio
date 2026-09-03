@@ -2,18 +2,12 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { currentProgram, type Program } from "@/lib/programs";
-import type { Segment } from "@/lib/types";
-import { Deck, type ClipMeta, type DeckStats } from "./Deck";
-import {
-  AnchorControl,
-  ChannelBug,
-  Clock,
-  LowerThird,
-  RundownRail,
-  ScheduleRail,
-  StatusRail,
-  Ticker,
-} from "./Chrome";
+import { loadAired, saveAired } from "@/lib/history";
+import { STRAND_MINUTES } from "@/lib/strands";
+import type { Comment, Segment } from "@/lib/types";
+import { Deck, type ClipMeta, type DeckStats, type ViewerTake } from "./Deck";
+import { ChannelBug, Clock, CommunityPanel, LowerThird, StatusRail, Ticker } from "./Chrome";
+import { ReactorMark } from "./ReactorMark";
 
 /**
  * Two decks keep one unbroken channel across session boundaries.
@@ -32,6 +26,22 @@ const PREROLL_LEAD_MS = 90_000;
 /** Don't strand the channel on a standby deck that never came up. */
 const PREROLL_GIVE_UP_MS = 4 * 60_000;
 
+/**
+ * How long the channel keeps generating for nobody.
+ *
+ * The GPU bills from the moment the session is ready until it disconnects,
+ * whether or not anyone is watching and whether or not a clip is building. A
+ * backgrounded tab is therefore the most expensive thing this app can do, so a
+ * hidden page gets a short grace period and then the channel comes off air and
+ * the session is dropped. Coming back is one click.
+ *
+ * The grace period is generous because tab switching is constant and a rebuild
+ * costs about thirty-five seconds of dead air. Five minutes of a hidden tab is
+ * about twelve cents of GPU — cheap next to taking the channel off a viewer who
+ * only went to check their email.
+ */
+const UNWATCHED_GRACE_MS = 5 * 60_000;
+
 type Slot = 0 | 1;
 const other = (s: Slot): Slot => (s === 0 ? 1 : 0);
 
@@ -48,15 +58,56 @@ export function Broadcast() {
   const [preview, setPreview] = useState<Segment[]>([]);
   const [errors, setErrors] = useState<string[]>([]);
   const [airtime, setAirtime] = useState(0);
-  const [still, setStill] = useState<{ blob: Blob; url: string } | null>(null);
+
+  /** Off air because nobody was watching, as opposed to never started. */
+  const [pausedForIdle, setPausedForIdle] = useState(false);
+  /** An unattended run: keep transmitting even with the tab in the background. */
+  const [transmitMode, setTransmitMode] = useState(false);
+  const [comments, setComments] = useState<Comment[]>([]);
+  const [commentsOnAir, setCommentsOnAir] = useState(true);
+
+  /** The channel opens on the startup desk for one block, then joins the wheel. */
+  const [openingUntil, setOpeningUntil] = useState<number | null>(null);
 
   const airStart = useRef<number | null>(null);
   const prerollStart = useRef<number | null>(null);
-  const usedStoryIds = useRef<Set<string>>(new Set());
+  /** Story id -> when it last went to air, so a long run does not loop. */
+  const usedStoryIds = useRef<Map<string, number>>(new Map());
   const liveRef = useRef<Slot>(0);
   const rotatingRef = useRef(false);
-  liveRef.current = live;
-  rotatingRef.current = rotating;
+  const commentsRef = useRef<Comment[]>([]);
+  const commentsOnAirRef = useRef(true);
+  // Mirrored after commit rather than during render: these are read by timers
+  // and network callbacks, never while rendering.
+  useEffect(() => {
+    liveRef.current = live;
+    rotatingRef.current = rotating;
+    commentsRef.current = comments;
+    commentsOnAirRef.current = commentsOnAir;
+  }, [live, rotating, comments, commentsOnAir]);
+
+  useEffect(() => {
+    setTransmitMode(new URLSearchParams(window.location.search).get("transmit") === "1");
+  }, []);
+
+  /**
+   * Pick up where this browser left off.
+   *
+   * A refresh used to be a rewind: the aired-story map lived only in a ref, so
+   * a reload dealt the same block again and the channel felt stuck. The history
+   * is restored here and written back as it runs.
+   */
+  useEffect(() => {
+    usedStoryIds.current = loadAired();
+    const id = setInterval(() => saveAired(usedStoryIds.current), 20_000);
+    const onLeave = () => saveAired(usedStoryIds.current);
+    window.addEventListener("pagehide", onLeave);
+    return () => {
+      clearInterval(id);
+      window.removeEventListener("pagehide", onLeave);
+      saveAired(usedStoryIds.current);
+    };
+  }, []);
 
   // The channel follows the clock: when the daypart changes, so does the program.
   useEffect(() => {
@@ -66,6 +117,97 @@ export function Broadcast() {
     }, 30_000);
     return () => clearInterval(id);
   }, []);
+
+  const loadComments = useCallback(async () => {
+    try {
+      const res = await fetch("/api/community", { cache: "no-store" });
+      if (!res.ok) return;
+      const body = (await res.json()) as { comments?: Comment[] };
+      setComments(body.comments ?? []);
+    } catch {
+      // The community panel is not worth an on-air warning when it fails.
+    }
+  }, []);
+
+  useEffect(() => {
+    // Deferred so the first load is not a synchronous state write inside the
+    // effect; the panel is a second behind at most.
+    const id = setInterval(() => void loadComments(), 5000);
+    const first = setTimeout(() => void loadComments(), 0);
+    return () => {
+      clearInterval(id);
+      clearTimeout(first);
+    };
+  }, [loadComments]);
+
+  const postComment = useCallback(
+    async (author: string, text: string): Promise<string | null> => {
+      try {
+        const res = await fetch("/api/community", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ author, text }),
+        });
+        const body = (await res.json()) as { error?: string };
+        if (!res.ok) return body.error ?? "Could not post that.";
+        await loadComments();
+        return null;
+      } catch {
+        return "Could not reach the studio.";
+      }
+    },
+    [loadComments],
+  );
+
+  /**
+   * Hand the deck a comment the anchor has something to say about.
+   *
+   * Oldest first, so the queue is fair rather than recency-biased. Every
+   * candidate is marked read whether or not it is answered — a comment the
+   * anchor has declined must not be reconsidered on the next block, or the
+   * channel spends every refill asking about the same message.
+   *
+   * At most a few are considered per block: this runs on the path to air, and
+   * a long queue of unanswerable comments must not hold up the bulletin.
+   */
+  const markRead = useCallback((id: string) => {
+    setComments((prev) => prev.map((c) => (c.id === id ? { ...c, readAt: Date.now() } : c)));
+    void fetch("/api/community", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ id }),
+    }).catch(() => {});
+  }, []);
+
+  const takeComment = useCallback(async (coverage: string[]): Promise<ViewerTake | null> => {
+    if (!commentsOnAirRef.current) return null;
+    const unread = commentsRef.current.filter((c) => !c.readAt).sort((a, b) => a.at - b.at);
+
+    for (const candidate of unread.slice(0, 3)) {
+      markRead(candidate.id);
+      try {
+        const res = await fetch("/api/reply", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ author: candidate.author, text: candidate.text, coverage }),
+        });
+        if (!res.ok) continue;
+        const body = (await res.json()) as { answer?: boolean; reply?: string };
+        if (body.answer && body.reply) {
+          return {
+            id: candidate.id,
+            author: candidate.author,
+            text: candidate.text,
+            reply: body.reply,
+          };
+        }
+      } catch {
+        // The anchor stays silent rather than reciting an unanswered comment.
+        return null;
+      }
+    }
+    return null;
+  }, [markRead]);
 
   const pushError = useCallback((message: string) => {
     setErrors((prev) => (prev[0] === message ? prev : [message, ...prev].slice(0, 4)));
@@ -161,29 +303,96 @@ export function Broadcast() {
     return () => clearInterval(id);
   }, [onAir, cutTo, beginPreroll]);
 
+  /**
+   * Drop every session and stop the clock. Unmounting the decks is what
+   * actually ends the billing: the SDK disconnects on teardown.
+   */
+  const goOffAir = useCallback((idle: boolean) => {
+    setOnAir(false);
+    setPausedForIdle(idle);
+    setMounted([false, false]);
+    setRotating(false);
+    setMeta(null);
+    setStats(null);
+    setPreview([]);
+    airStart.current = null;
+    prerollStart.current = null;
+    setEpoch((prev) => [prev[0] + 1, prev[1] + 1]);
+  }, []);
+
   const takeAir = useCallback(() => {
     setOnAir(true);
     setMounted([true, false]);
     setLive(0);
+    setOpeningUntil(Date.now() + STRAND_MINUTES * 60_000);
+    setPausedForIdle(false);
     airStart.current = Date.now();
   }, []);
 
-  const setAnchor = useCallback((blob: Blob | null) => {
-    setStill((prev) => {
-      if (prev) URL.revokeObjectURL(prev.url);
-      return blob ? { blob, url: URL.createObjectURL(blob) } : null;
-    });
-  }, []);
+  /**
+   * Nobody is watching this tab. Give it a moment in case they are coming
+   * straight back, then take the channel down and stop paying for it.
+   *
+   * `?transmit=1` opts out. That is for a deliberate unattended run — a
+   * transmission tab left going for hours — where coming off air because the
+   * operator looked at something else would defeat the point. It is a URL flag
+   * rather than a setting because it should be an explicit act each time: this
+   * is the one switch that lets the channel bill with nobody watching.
+   */
+  useEffect(() => {
+    if (!onAir || transmitMode) return;
+    let timer: ReturnType<typeof setTimeout> | null = null;
+
+    const onVisibility = () => {
+      if (document.hidden) {
+        timer = setTimeout(() => goOffAir(true), UNWATCHED_GRACE_MS);
+      } else if (timer) {
+        clearTimeout(timer);
+        timer = null;
+      }
+    };
+
+    document.addEventListener("visibilitychange", onVisibility);
+    // A tab hidden before this mounted still counts.
+    if (document.hidden) onVisibility();
+
+    return () => {
+      document.removeEventListener("visibilitychange", onVisibility);
+      if (timer) clearTimeout(timer);
+    };
+  }, [onAir, goOffAir, transmitMode]);
+
+  /**
+   * Come back on air by itself when the viewer returns.
+   *
+   * A television that needed a button press every time you looked away would
+   * not be a television. The browser allows this because the viewer already
+   * gestured once to start the channel, and that permission holds for the life
+   * of the page.
+   */
+  useEffect(() => {
+    if (onAir || !pausedForIdle) return;
+
+    const onVisibility = () => {
+      if (!document.hidden) takeAir();
+    };
+
+    document.addEventListener("visibilitychange", onVisibility);
+    return () => document.removeEventListener("visibilitychange", onVisibility);
+  }, [onAir, pausedForIdle, takeAir]);
 
   const deckProps = useMemo(
     () => ({
       program,
-      anchorStill: still?.blob ?? null,
+      anchorStill: null,
       usedStoryIds,
       onError: pushError,
+      takeComment,
     }),
-    [program, still, pushError],
+    [program, pushError, takeComment],
   );
+
+  const unread = comments.filter((c) => !c.readAt).length;
 
   return (
     <div className="app" style={{ ["--accent" as string]: program.accent }}>
@@ -200,6 +409,7 @@ export function Broadcast() {
               >
                 <Deck
                   {...deckProps}
+                  openingUntil={openingUntil}
                   live={live === slot}
                   onPictureLive={() => handlePictureLive(slot)}
                   onSessionLost={() => handleSessionLost(slot)}
@@ -221,13 +431,16 @@ export function Broadcast() {
             <div className="gate">
               <div className="gate-inner">
                 <div className="gate-mark">R24</div>
-                <h1 className="gate-title">Rolling news, generated live</h1>
+                <h1 className="gate-title">
+                  {pausedForIdle ? "Channel paused" : "Startups and technology, around the clock"}
+                </h1>
                 <p className="gate-copy">
-                  A continuous bulletin built segment by segment from live wire feeds. Sound is part
-                  of the generation, so the channel needs your go-ahead to start.
+                  {pausedForIdle
+                    ? "This tab was in the background, so the channel came off air and released the GPU — it bills by the second whether or not anyone is watching."
+                    : "A continuous bulletin built segment by segment from live wire feeds. The channel opens on the startup desk. Sound is part of the generation, so it needs your go-ahead to start."}
                 </p>
                 <button type="button" className="btn btn-primary" onClick={takeAir}>
-                  Take air
+                  {pausedForIdle ? "Back on air" : "Take air"}
                 </button>
               </div>
             </div>
@@ -258,10 +471,30 @@ export function Broadcast() {
           <div className="rail-mark">R24 CONTROL</div>
           <div className="rail-sub">{program.name}</div>
         </header>
-        <StatusRail stats={stats} airtime={airtime} rotating={rotating} errors={errors} />
-        <ScheduleRail program={program} />
-        <RundownRail segments={preview} />
-        <AnchorControl still={still} onChange={setAnchor} />
+
+        <StatusRail
+          airtime={airtime}
+          rotating={rotating}
+          errors={errors}
+          transmitMode={transmitMode}
+        />
+
+        <CommunityPanel
+          comments={comments}
+          onAir={commentsOnAir}
+          onToggleOnAir={setCommentsOnAir}
+          onPost={postComment}
+        />
+
+        <a
+          className="powered"
+          href="https://reactor.inc"
+          target="_blank"
+          rel="noreferrer noopener"
+        >
+          <span>Powered by</span>
+          <ReactorMark className="powered-mark" />
+        </a>
       </aside>
     </div>
   );

@@ -12,9 +12,65 @@ const WORDS_PER_SECOND = 2.3;
 /** Leading and trailing frames go to the anchor settling and the cut. */
 const HEAD_TAIL_SECONDS = 1.6;
 
+/**
+ * Clip lengths the channel is allowed to ask for.
+ *
+ * A length the deployment has not built before pays a one-off compile cost, so
+ * this is a short fixed set rather than a number computed per clip.
+ *
+ * Cutaways are the long ones on purpose. A shot needs time to be footage rather
+ * than a glimpse — the eye has to find the subject before the movement in it
+ * means anything — and the b-roll is where the story's detail is spoken, so it
+ * has more to carry than the anchor's one-line introduction.
+ */
+export const CLIP_TIERS = {
+  /** Bumpers, links and viewer mail. */
+  brief: 8.5,
+  /** The anchor's read to camera. */
+  read: 12.25,
+  /** Cutaways and correspondent standups: the model's longest clip. */
+  footage: 14.375,
+} as const;
+
 export function wordBudget(clipSeconds: number): number {
   return Math.max(6, Math.floor((clipSeconds - HEAD_TAIL_SECONDS) * WORDS_PER_SECOND));
 }
+
+/**
+ * How long this particular clip should run.
+ *
+ * Length follows the job the clip is doing. A cutaway carrying the story's
+ * detail gets the model's longest clip; a bumper reading two headlines does
+ * not need it and burns GPU time it cannot fill.
+ */
+export function clipSecondsFor(segment: Segment, sessionDefault: number): number {
+  switch (segment.kind) {
+    case "broll":
+    case "reporter":
+      return CLIP_TIERS.footage;
+    case "bumper":
+    case "viewer":
+      return CLIP_TIERS.brief;
+    case "tag":
+    default:
+      return sessionDefault || CLIP_TIERS.read;
+  }
+}
+
+/**
+ * How each framing is actually shot.
+ *
+ * The framing is the difference between a package that moves and one that sits
+ * at eye level for two minutes, so it is spent on camera language rather than
+ * on more description of the subject.
+ */
+const FRAMING: Record<string, string> = {
+  aerial:
+    "Aerial helicopter shot looking down, the camera flying slowly forward and banking, the ground far below",
+  ground: "Street-level handheld news camera, slight movement, people passing",
+  interior: "Handheld interior shot, available light through windows, the camera drifting slowly",
+  detail: "Tight close shot, shallow focus, the camera easing in on one small movement",
+};
 
 /**
  * Words that leave a line hanging when a trim lands on them. Cutting after
@@ -86,7 +142,10 @@ export function buildPrompt(
   const script = sanitiseScript(composeScript(segment, wordBudget(clipSeconds)));
 
   if (segment.kind === "broll" && segment.shot) {
-    return buildBrollPrompt(segment.shot, script, program, clipSeconds);
+    return buildBrollPrompt(segment, script, program, clipSeconds);
+  }
+  if (segment.kind === "reporter" && segment.scene) {
+    return buildReporterPrompt(segment, script, program, clipSeconds);
   }
 
   const audio = `Audio: ${program.bed}; the anchor's voice close and dry on a broadcast microphone.`;
@@ -129,25 +188,69 @@ export function buildPrompt(
  * put a presenter back in frame. Everything the picture needs comes from the
  * shot description; everything the sound needs is the voiceover plus the
  * location's own atmosphere, which replaces the studio bed for these seconds.
+ *
+ * These clips run the model's full length, so the shot is asked to develop
+ * rather than hold: a fourteen-second static frame reads as a freeze.
  */
 function buildBrollPrompt(
-  shot: string,
+  segment: Segment,
   script: string,
   program: Program,
   clipSeconds: number,
 ): string {
-  const shotText = shot.replace(/\s+/g, " ").trim().replace(/[.]+$/, "");
+  const shotText = (segment.shot ?? "").replace(/\s+/g, " ").trim().replace(/[.]+$/, "");
+  const look = FRAMING[segment.framing ?? "ground"] ?? FRAMING.ground;
   const parts = [
-    `Documentary news footage, no presenter on screen, no text or graphics:`,
+    `Documentary news footage, no presenter on screen, no lettering, no signage, no text or graphics anywhere in frame:`,
     `${cap(shotText)}.`,
-    `Steady handheld camera, natural light, real location.`,
+    `${look}.`,
+    `The shot develops across its full length: continuous movement, never a held frame.`,
     `S1 (an unseen news anchor, voiceover over the footage, ${program.tone}): "${script}"`,
     `Audio: the location's own atmosphere under the voice; no studio music.`,
   ];
 
   let prompt = parts.join(" ").replace(/\s+/g, " ").trim();
   if (prompt.length > PROMPT_LIMIT) {
-    // The look clause is the first thing worth losing; the shot and the voice are not.
+    // The development clause goes first; the framing and the voice do not.
+    prompt = [parts[0], parts[1], parts[2], parts[4], parts[5]].join(" ").replace(/\s+/g, " ").trim();
+  }
+  if (prompt.length > PROMPT_LIMIT) {
+    prompt = [parts[0], parts[1], parts[4], parts[5]].join(" ").replace(/\s+/g, " ").trim();
+  }
+  if (prompt.length > PROMPT_LIMIT) {
+    const shorter = fitWords(script, Math.max(6, wordBudget(clipSeconds) - 8));
+    prompt = prompt.replace(script, shorter);
+  }
+  return prompt.slice(0, PROMPT_LIMIT);
+}
+
+/**
+ * The correspondent.
+ *
+ * The one shot in the channel that is neither the studio nor silent footage: a
+ * person on location, talking to camera, with the place audible behind them.
+ * It is what separates a bulletin being read from a story being covered, so the
+ * prompt spends its characters on the two things that sell it — that the
+ * reporter is outdoors holding a microphone, and that the location has its own
+ * noise.
+ */
+function buildReporterPrompt(
+  segment: Segment,
+  script: string,
+  program: Program,
+  clipSeconds: number,
+): string {
+  const scene = (segment.scene ?? "").replace(/\s+/g, " ").trim().replace(/[.]+$/, "");
+  const parts = [
+    `On-location television news report, no lettering or signage in frame.`,
+    `A news correspondent stands facing camera holding a microphone, ${scene} behind them.`,
+    `Medium shot, slight handheld movement, available daylight, people passing in the background.`,
+    `S1 (the correspondent, clear field-report delivery, a shade more urgent than a studio read): "${script}"`,
+    `Audio: the location's own background noise around the voice; no studio music.`,
+  ];
+
+  let prompt = parts.join(" ").replace(/\s+/g, " ").trim();
+  if (prompt.length > PROMPT_LIMIT) {
     prompt = [parts[0], parts[1], parts[3], parts[4]].join(" ").replace(/\s+/g, " ").trim();
   }
   if (prompt.length > PROMPT_LIMIT) {

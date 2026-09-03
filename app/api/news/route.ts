@@ -103,9 +103,49 @@ function parseFeed(xml: string, source: string, category: Category): Story[] {
         category,
         link,
         publishedAt: Number.isNaN(parsed) ? Date.now() : parsed,
+        image: imageUrl(item),
       };
     })
     .filter((s): s is Story => s !== null);
+}
+
+/**
+ * The publisher's own lead image.
+ *
+ * Feeds advertise it three different ways and no feed uses all three, so all
+ * three are tried. This is the picture the outlet chose for the story, which
+ * makes it the one image the channel can put on screen and stand behind — far
+ * better than anything a search would guess at.
+ */
+function imageUrl(item: Record<string, unknown>): string | undefined {
+  const candidates = [
+    item["media:content"],
+    item["media:thumbnail"],
+    item.enclosure,
+    item["itunes:image"],
+  ];
+
+  for (const c of candidates) {
+    const list = Array.isArray(c) ? c : [c];
+    for (const entry of list) {
+      if (!entry || typeof entry !== "object") continue;
+      const o = entry as Record<string, unknown>;
+      const url = typeof o["@_url"] === "string" ? o["@_url"] : undefined;
+      const type = typeof o["@_type"] === "string" ? o["@_type"] : "";
+      const medium = typeof o["@_medium"] === "string" ? o["@_medium"] : "";
+      if (!url) continue;
+      // Enclosures carry audio and video too; only pictures are wanted.
+      if (type && !type.startsWith("image/")) continue;
+      if (medium && medium !== "image") continue;
+      if (/\.(mp3|mp4|m4a|wav)(\?|$)/i.test(url)) continue;
+      return url;
+    }
+  }
+
+  // Some feeds only ever put the picture in the HTML body.
+  const body = text(item["content:encoded"]) || text(item.description);
+  const inline = body.match(/<img[^>]+src=["']([^"']+)["']/i);
+  return inline?.[1];
 }
 
 function text(v: unknown): string {
