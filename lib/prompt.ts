@@ -49,8 +49,10 @@ export function clipSecondsFor(segment: Segment, sessionDefault: number): number
     case "reporter":
       return CLIP_TIERS.footage;
     case "bumper":
-    case "viewer":
       return CLIP_TIERS.brief;
+    // Naming the viewer and answering them does not fit in a bumper's budget.
+    case "viewer":
+      return CLIP_TIERS.footage;
     case "tag":
     default:
       return sessionDefault || CLIP_TIERS.read;

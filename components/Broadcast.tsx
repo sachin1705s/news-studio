@@ -5,7 +5,7 @@ import { currentProgram, type Program } from "@/lib/programs";
 import { loadAired, saveAired } from "@/lib/history";
 import { STRAND_MINUTES } from "@/lib/strands";
 import type { Comment, Segment } from "@/lib/types";
-import { Deck, type ClipMeta, type DeckStats, type ViewerTake } from "./Deck";
+import { Deck, ViewerDeck, type ClipMeta, type DeckStats, type ViewerTake } from "./Deck";
 import { ChannelBug, Clock, CommunityPanel, LowerThird, StatusRail, Ticker } from "./Chrome";
 import { ReactorMark } from "./ReactorMark";
 
@@ -65,12 +65,25 @@ export function Broadcast() {
   const [transmitMode, setTransmitMode] = useState(false);
   /** How many people have the channel open right now. */
   const [watching, setWatching] = useState<number | null>(null);
+
+  /**
+   * Whether this browser is running the channel or watching one.
+   *
+   * Exactly one browser holds the GPU session; everyone else attaches to it.
+   * The role is decided at take-air by whether a live channel is already
+   * registered, which is what stops a second visitor starting a second stream.
+   */
+  const [role, setRole] = useState<"idle" | "origin" | "viewer">("idle");
+  const [adoptSessionId, setAdoptSessionId] = useState<string | null>(null);
+  const originId = useRef<string>("");
   const [comments, setComments] = useState<Comment[]>([]);
 
   /** The channel opens on the startup desk for one block, then joins the wheel. */
   const [openingUntil, setOpeningUntil] = useState<number | null>(null);
 
   const airStart = useRef<number | null>(null);
+  /** The session id of the broadcast this browser created, once it has one. */
+  const liveSessionId = useRef<string | null>(null);
   const prerollStart = useRef<number | null>(null);
   /** Story id -> when it last went to air, so a long run does not loop. */
   const usedStoryIds = useRef<Map<string, number>>(new Map());
@@ -107,6 +120,74 @@ export function Broadcast() {
       saveAired(usedStoryIds.current);
     };
   }, []);
+
+  const pushError = useCallback((message: string) => {
+    setErrors((prev) => (prev[0] === message ? prev : [message, ...prev].slice(0, 4)));
+  }, []);
+
+  useEffect(() => {
+    const KEY = "r24.origin";
+    try {
+      originId.current = window.localStorage.getItem(KEY) ?? "";
+      if (!originId.current) {
+        originId.current = crypto.randomUUID();
+        window.localStorage.setItem(KEY, originId.current);
+      }
+    } catch {
+      originId.current = crypto.randomUUID();
+    }
+  }, []);
+
+  /**
+   * Register the session this browser created, so others attach to it.
+   *
+   * The claim is first-come. Losing it means someone else started the channel
+   * in the moments between the check and the session coming up — so this
+   * browser stands down and watches theirs instead of running a second stream.
+   */
+  const registerChannel = useCallback(async (sessionId: string) => {
+    try {
+      const res = await fetch("/api/channel", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ sessionId, originId: originId.current }),
+      });
+      if (!res.ok) return;
+      const body = (await res.json()) as {
+        claimed?: boolean;
+        channel?: { sessionId: string } | null;
+      };
+      if (body.claimed === false && body.channel?.sessionId) {
+        pushError("Another browser is already broadcasting. Watching theirs.");
+        setAdoptSessionId(body.channel.sessionId);
+        setRole("viewer");
+      }
+    } catch {
+      // The registry is how others find this broadcast; failing to reach it
+      // does not stop this browser watching its own.
+    }
+  }, [pushError]);
+
+  // Keep the registration warm while broadcasting; retire it on the way out.
+  useEffect(() => {
+    if (role !== "origin" || !onAir) return;
+    const id = setInterval(() => {
+      const sid = liveSessionId.current;
+      if (sid) void registerChannel(sid);
+    }, 30_000);
+
+    const retire = () => {
+      navigator.sendBeacon?.(
+        "/api/channel",
+        new Blob([JSON.stringify({ originId: originId.current })], { type: "application/json" }),
+      );
+    };
+    window.addEventListener("pagehide", retire);
+    return () => {
+      clearInterval(id);
+      window.removeEventListener("pagehide", retire);
+    };
+  }, [role, onAir, registerChannel]);
 
   /**
    * Announce this viewer, and read back how many others are here.
@@ -265,10 +346,6 @@ export function Broadcast() {
     return null;
   }, [markRead]);
 
-  const pushError = useCallback((message: string) => {
-    setErrors((prev) => (prev[0] === message ? prev : [message, ...prev].slice(0, 4)));
-  }, []);
-
   const cutTo = useCallback((slot: Slot) => {
     const spent = other(slot);
     setLive(slot);
@@ -376,12 +453,41 @@ export function Broadcast() {
     setEpoch((prev) => [prev[0] + 1, prev[1] + 1]);
   }, []);
 
-  const takeAir = useCallback(() => {
+  /**
+   * Join the channel.
+   *
+   * If someone is already broadcasting, this browser attaches to their session
+   * and watches it. Only when nobody is does it start one — so the first person
+   * through the door pays for the GPU and everybody after them is free.
+   */
+  const takeAir = useCallback(async () => {
+    setPausedForIdle(false);
+
+    let existing: string | null = null;
+    try {
+      const res = await fetch("/api/channel", { cache: "no-store" });
+      if (res.ok) {
+        const body = (await res.json()) as { channel?: { sessionId: string } | null };
+        existing = body.channel?.sessionId ?? null;
+      }
+    } catch {
+      // Unreachable registry: start a broadcast rather than show nothing.
+    }
+
+    if (existing) {
+      setAdoptSessionId(existing);
+      setRole("viewer");
+      setOnAir(true);
+      airStart.current = Date.now();
+      return;
+    }
+
+    setRole("origin");
+    setAdoptSessionId(null);
     setOnAir(true);
     setMounted([true, false]);
     setLive(0);
     setOpeningUntil(Date.now() + STRAND_MINUTES * 60_000);
-    setPausedForIdle(false);
     airStart.current = Date.now();
   }, []);
 
@@ -453,7 +559,29 @@ export function Broadcast() {
     <div className="app" style={{ ["--accent" as string]: program.accent }}>
       <main className="stage">
         <div className="screen">
-          {[0, 1].map((n) => {
+          {role === "viewer" && adoptSessionId && (
+            <div className="deck is-live">
+              <ViewerDeck
+                sessionId={adoptSessionId}
+                program={program}
+                onSegment={setMeta}
+                onPictureLive={() => {
+                  if (airStart.current === null) airStart.current = Date.now();
+                }}
+                onSessionLost={() => {
+                  // The broadcast ended. Go back to the door and see whether
+                  // somebody else has started one, or start one.
+                  setRole("idle");
+                  setAdoptSessionId(null);
+                  setOnAir(false);
+                  setMeta(null);
+                }}
+                onError={pushError}
+              />
+            </div>
+          )}
+
+          {role === "origin" && [0, 1].map((n) => {
             const slot = n as Slot;
             if (!mounted[slot]) return null;
             return (
@@ -476,6 +604,11 @@ export function Broadcast() {
                   }}
                   onQueuePreview={(segments) => {
                     if (liveRef.current === slot) setPreview(segments);
+                  }}
+                  onSessionId={(sid) => {
+                    if (liveSessionId.current === sid) return;
+                    liveSessionId.current = sid;
+                    void registerChannel(sid);
                   }}
                 />
               </div>

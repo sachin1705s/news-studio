@@ -6,30 +6,31 @@ export const dynamic = "force-dynamic";
 /**
  * A hard ceiling on any single session, in seconds.
  *
- * Billing runs from session creation to termination, not from first frame, so
+ * Billing runs from GPU assignment to termination, not from first frame, so
  * this is the blast radius of a session that escapes clean teardown — a closed
  * laptop, a crashed tab, a lost network. The API allows up to 24 hours; asking
- * for that would mean a day of billing for one orphan, which is a bad trade for
- * a channel that rotates sessions anyway. An hour is long enough to run
- * continuously and short enough to bound the damage.
+ * for that would mean a day of billing for one orphan. An hour is long enough
+ * to run continuously and short enough to bound the damage.
  */
 const MAX_SESSION_SECONDS = Number(process.env.REACTOR_MAX_SESSION_SECONDS ?? 3600);
 
 /**
  * Mints a session-scoped JWT for fast-h3.
  *
- * Two constraints matter here and they count different things.
+ * Two kinds of token come out of here, and the difference is the whole of the
+ * channel's safety model.
  *
- * `max_sessions` is how many sessions this token may EVER create, not how many
- * at once — closing one does not hand the budget back. A channel that rotates
- * sessions works through it steadily, so it is minted generously.
+ * The **origin** token creates the one session the channel broadcasts from. It
+ * may create sessions, so it is only ever handed to the client that is starting
+ * the channel.
  *
- * `max_session_duration_seconds` caps a single session. Omitting it does not
- * mean unlimited: the account's own maximum applies wherever it is lower, and
- * that is what really decides how often the channel must rotate. Asking for the
- * ceiling leaves the account limit as the only one in play.
+ * A **viewer** token is minted against a session that already exists, named in
+ * `resources.sessions.bind`. A session-scoped token can otherwise only act on
+ * sessions it created; binding authorises it for this one and no other. That is
+ * what lets any number of people watch one broadcast without any of them being
+ * able to start a second GPU session on the account.
  */
-export async function POST() {
+export async function POST(request: Request) {
   const apiKey = process.env.REACTOR_API_KEY;
   if (!apiKey) {
     return NextResponse.json(
@@ -37,6 +38,20 @@ export async function POST() {
       { status: 500 },
     );
   }
+
+  let sessionId: string | undefined;
+  try {
+    const body = (await request.json()) as { sessionId?: unknown };
+    if (typeof body?.sessionId === "string" && body.sessionId) sessionId = body.sessionId;
+  } catch {
+    // No body is the origin case.
+  }
+
+  const constraints: Record<string, number> = sessionId
+    ? // A viewer never needs to create one. The floor the API accepts is 1, so
+      // this cannot be zero — a short expiry is what bounds it instead.
+      { max_sessions: 1 }
+    : { max_sessions: 24, max_session_duration_seconds: MAX_SESSION_SECONDS };
 
   const res = await fetch("https://api.reactor.inc/tokens", {
     method: "POST",
@@ -49,11 +64,11 @@ export async function POST() {
       authorization_details: [
         {
           type: "session",
-          resources: { models: { match: ["fast-h3"] } },
-          constraints: {
-            max_sessions: 24,
-            max_session_duration_seconds: MAX_SESSION_SECONDS,
+          resources: {
+            models: { match: ["fast-h3"] },
+            ...(sessionId ? { sessions: { bind: [sessionId] } } : {}),
           },
+          constraints,
         },
       ],
     }),
@@ -69,7 +84,7 @@ export async function POST() {
 
   const { jwt, expires_at } = await res.json();
   return NextResponse.json(
-    { jwt, expires_at, requestedSessionSeconds: MAX_SESSION_SECONDS },
+    { jwt, expires_at, role: sessionId ? "viewer" : "origin" },
     { headers: { "Cache-Control": "private, no-store" } },
   );
 }

@@ -76,35 +76,151 @@ interface DeckProps {
   onStats: (stats: DeckStats) => void;
   onQueuePreview: (segments: Segment[]) => void;
   onError: (message: string) => void;
+  /** The session this deck created, so the channel can be registered for viewers. */
+  onSessionId: (sessionId: string) => void;
   live: boolean;
 }
 
-let tokenCache: { jwt: string; expiresAt: number } | null = null;
-let inFlight: Promise<string> | null = null;
+/**
+ * Tokens are cached per role.
+ *
+ * The origin's token may create sessions; a viewer's is bound to the one
+ * session the channel is broadcasting from and can do nothing else. They are
+ * different credentials and must never be shared between the two.
+ */
+const tokenCache = new Map<string, { jwt: string; expiresAt: number }>();
+const inFlight = new Map<string, Promise<string>>();
 
-/** Scoped tokens last an hour; decks that rotate every ~17 minutes can share one. */
-async function fetchToken(): Promise<string> {
-  if (tokenCache && Date.now() < tokenCache.expiresAt - 60_000) return tokenCache.jwt;
-  if (inFlight) return inFlight;
-  inFlight = (async () => {
+async function fetchToken(adopt: string | null): Promise<string> {
+  const key = adopt ?? "origin";
+  const cached = tokenCache.get(key);
+  if (cached && Date.now() < cached.expiresAt - 60_000) return cached.jwt;
+
+  const running = inFlight.get(key);
+  if (running) return running;
+
+  const request = (async () => {
     try {
-      const res = await fetch("/api/reactor/token", { method: "POST" });
+      const res = await fetch("/api/reactor/token", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(adopt ? { sessionId: adopt } : {}),
+      });
       const body = await res.json();
       if (!res.ok) throw new Error(body?.error ?? `Token request failed (${res.status})`);
-      tokenCache = { jwt: body.jwt, expiresAt: body.expires_at * 1000 };
+      tokenCache.set(key, { jwt: body.jwt, expiresAt: body.expires_at * 1000 });
       return body.jwt as string;
     } finally {
-      inFlight = null;
+      inFlight.delete(key);
     }
   })();
-  return inFlight;
+
+  inFlight.set(key, request);
+  return request;
 }
+
+const originToken = () => fetchToken(null);
 
 export function Deck(props: DeckProps) {
   return (
-    <FastH3Provider jwtToken={fetchToken} connectOptions={{ autoConnect: true }}>
+    <FastH3Provider jwtToken={originToken} connectOptions={{ autoConnect: true }}>
       <DeckInner {...props} />
     </FastH3Provider>
+  );
+}
+
+/**
+ * A viewer of the channel.
+ *
+ * It attaches to the session the origin created rather than starting one of
+ * its own, which is what makes this a channel instead of a per-visitor render
+ * farm: any number of these cost nothing beyond the one session already
+ * running, and every one of them is looking at the same frame.
+ *
+ * It is strictly receive-only. It never configures the session, never queues a
+ * clip and never touches the producer — the origin owns all of that. All it
+ * does is show the picture and read the metadata riding on each clip so the
+ * lower third says the right thing.
+ */
+export function ViewerDeck({
+  sessionId,
+  program,
+  onSegment,
+  onPictureLive,
+  onSessionLost,
+  onError,
+}: {
+  sessionId: string;
+  program: Program;
+  onSegment: (meta: ClipMeta) => void;
+  onPictureLive: () => void;
+  onSessionLost: () => void;
+  onError: (message: string) => void;
+}) {
+  const jwt = useCallback(() => fetchToken(sessionId), [sessionId]);
+  return (
+    <FastH3Provider
+      jwtToken={jwt}
+      connectOptions={{ autoConnect: true, sessionId }}
+    >
+      <ViewerInner
+        program={program}
+        onSegment={onSegment}
+        onPictureLive={onPictureLive}
+        onSessionLost={onSessionLost}
+        onError={onError}
+      />
+    </FastH3Provider>
+  );
+}
+
+function ViewerInner({
+  onSegment,
+  onPictureLive,
+  onSessionLost,
+  onError,
+}: {
+  program: Program;
+  onSegment: (meta: ClipMeta) => void;
+  onPictureLive: () => void;
+  onSessionLost: () => void;
+  onError: (message: string) => void;
+}) {
+  const { status } = useFastH3();
+  const sawPicture = useRef(false);
+  const wasReady = useRef(false);
+  const reported = useRef(false);
+
+  useEffect(() => {
+    console.debug(`[viewer] status: ${status}`);
+    if (status === "ready") wasReady.current = true;
+    // The broadcast this viewer attached to has gone. The page decides whether
+    // to start a new one; this component only reports it.
+    if (wasReady.current && status === "disconnected" && !reported.current) {
+      reported.current = true;
+      onSessionLost();
+    }
+  }, [status, onSessionLost]);
+
+  useFastH3ClipStarted((message) => {
+    if (!sawPicture.current) {
+      sawPicture.current = true;
+      onPictureLive();
+    }
+    const meta = parseMeta(message.clip.metadata);
+    if (meta) onSegment(meta);
+  });
+
+  useFastH3CommandError((message) => {
+    onError(`${message.command}: ${message.reason}`);
+  });
+
+  return (
+    <FastH3MainVideoView
+      audioTrack="main_audio"
+      className="deck-video"
+      videoObjectFit="cover"
+    />
   );
 }
 
@@ -195,6 +311,7 @@ function DeckInner({
   usedStoryIds,
   openingUntil,
   takeComment,
+  onSessionId,
   onPictureLive,
   onSessionLost,
   onSegment,
@@ -203,7 +320,7 @@ function DeckInner({
   onError,
   live,
 }: DeckProps) {
-  const { status, sendCommand, setCanvas, setAutoplay, setClipSeconds, setFlushOnClipEnd, setSeed, enqueue, uploadFile } =
+  const { status, sessionId, sendCommand, setCanvas, setAutoplay, setClipSeconds, setFlushOnClipEnd, setSeed, enqueue, uploadFile } =
     useFastH3();
 
   const [configured, setConfigured] = useState(false);
@@ -572,7 +689,9 @@ function DeckInner({
       slug: `${take.author} writes`,
       strap: "From the R24 community",
       author: take.author,
-      script: `${take.author} writes: ${take.text} ${take.reply}`,
+      // The reply is the whole spoken line: the producer names the viewer and
+      // answers them in one breath, so the comment is not recited first.
+      script: take.reply,
     };
   }, [openingUntil, program.id, takeComment]);
 
@@ -642,6 +761,12 @@ function DeckInner({
   useEffect(() => {
     console.debug(`[deck] status: ${status}`);
   }, [status]);
+
+  // Published as soon as it exists, so viewers can attach to this broadcast
+  // rather than starting one of their own.
+  useEffect(() => {
+    if (sessionId) onSessionId(sessionId);
+  }, [sessionId, onSessionId]);
 
   /**
    * A session that has been up and then reports disconnected is gone: the SDK
