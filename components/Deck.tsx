@@ -145,6 +145,7 @@ export function Deck(props: DeckProps) {
 export function ViewerDeck({
   sessionId,
   program,
+  muted,
   onSegment,
   onPictureLive,
   onSessionLost,
@@ -152,6 +153,8 @@ export function ViewerDeck({
 }: {
   sessionId: string;
   program: Program;
+  /** Viewers join muted: browsers refuse unmuted autoplay without a gesture. */
+  muted: boolean;
   onSegment: (meta: ClipMeta) => void;
   onPictureLive: () => void;
   onSessionLost: () => void;
@@ -165,6 +168,7 @@ export function ViewerDeck({
     >
       <ViewerInner
         program={program}
+        muted={muted}
         onSegment={onSegment}
         onPictureLive={onPictureLive}
         onSessionLost={onSessionLost}
@@ -175,12 +179,14 @@ export function ViewerDeck({
 }
 
 function ViewerInner({
+  muted,
   onSegment,
   onPictureLive,
   onSessionLost,
   onError,
 }: {
   program: Program;
+  muted: boolean;
   onSegment: (meta: ClipMeta) => void;
   onPictureLive: () => void;
   onSessionLost: () => void;
@@ -218,6 +224,7 @@ function ViewerInner({
   return (
     <FastH3MainVideoView
       audioTrack="main_audio"
+      muted={muted}
       className="deck-video"
       videoObjectFit="cover"
     />

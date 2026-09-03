@@ -23,19 +23,19 @@ export function Clock() {
 
 export function ChannelBug({
   program,
-  onAir,
   watching,
 }: {
   program: Program;
-  onAir: boolean;
   watching: number | null;
 }) {
   return (
     <div className="bug">
       <div className="bug-mark">R24</div>
-      <div className={`bug-live ${onAir ? "is-live" : ""}`}>
+      {/* A channel does not tell its audience it is on standby. Either it is on
+          air, or the slate underneath explains what it is waiting for. */}
+      <div className="bug-live is-live">
         <span className="dot" />
-        {onAir ? "LIVE" : "STANDBY"}
+        LIVE
       </div>
       <div className="bug-prog" style={{ color: program.accent }}>
         {program.name}

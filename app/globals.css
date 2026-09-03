@@ -955,3 +955,25 @@ body {
   letter-spacing: 0.08em;
   color: var(--ink-dim);
 }
+
+/* Viewers join muted; one tap brings the sound. */
+.unmute {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  padding: 12px 22px;
+  background: rgba(6, 8, 12, 0.82);
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  color: var(--ink);
+  font-family: var(--mono);
+  font-size: 12px;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  cursor: pointer;
+  backdrop-filter: blur(6px);
+}
+
+.unmute:hover {
+  background: rgba(6, 8, 12, 0.94);
+}

@@ -75,6 +75,8 @@ export function Broadcast() {
    */
   const [role, setRole] = useState<"idle" | "origin" | "viewer">("idle");
   const [adoptSessionId, setAdoptSessionId] = useState<string | null>(null);
+  /** Viewers join muted, because browsers refuse unmuted autoplay without a gesture. */
+  const [muted, setMuted] = useState(true);
   const originId = useRef<string>("");
   const [comments, setComments] = useState<Comment[]>([]);
 
@@ -191,6 +193,39 @@ export function Broadcast() {
       window.removeEventListener("pagehide", retire);
     };
   }, [role, onAir, registerChannel]);
+
+  /**
+   * Join whatever is already on air, without being asked.
+   *
+   * A viewer arriving at a running channel should see the channel, not a door.
+   * The join is muted because browsers refuse unmuted autoplay without a
+   * gesture — the picture starts immediately and one tap brings the sound.
+   */
+  useEffect(() => {
+    if (onAir || role !== "idle") return;
+    let cancelled = false;
+
+    (async () => {
+      try {
+        const res = await fetch("/api/channel", { cache: "no-store" });
+        if (!res.ok) return;
+        const body = (await res.json()) as { channel?: { sessionId: string } | null };
+        const sid = body.channel?.sessionId;
+        if (!sid || cancelled) return;
+        setAdoptSessionId(sid);
+        setRole("viewer");
+        setMuted(true);
+        setOnAir(true);
+        airStart.current = Date.now();
+      } catch {
+        // Nothing on air, or unreachable: the gate stays and offers to start one.
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [onAir, role]);
 
   /**
    * Announce this viewer, and read back how many others are here.
@@ -386,7 +421,8 @@ export function Broadcast() {
     (slot: Slot) => {
       if (slot !== liveRef.current) return;
       pushError("The on-air session ended. Bringing up a fresh one.");
-      setMeta(null);
+      // The lower third is left standing. Blanking it turns a gap the viewer
+      // might not notice into an obviously dead channel.
       beginPreroll();
     },
     [beginPreroll, pushError],
@@ -480,6 +516,8 @@ export function Broadcast() {
     if (existing) {
       setAdoptSessionId(existing);
       setRole("viewer");
+      // Started by a click, so sound is allowed.
+      setMuted(false);
       setOnAir(true);
       airStart.current = Date.now();
       return;
@@ -487,6 +525,7 @@ export function Broadcast() {
 
     setRole("origin");
     setAdoptSessionId(null);
+    setMuted(false);
     setOnAir(true);
     setMounted([true, false]);
     setLive(0);
@@ -567,17 +606,17 @@ export function Broadcast() {
               <ViewerDeck
                 sessionId={adoptSessionId}
                 program={program}
+                muted={muted}
                 onSegment={setMeta}
                 onPictureLive={() => {
                   if (airStart.current === null) airStart.current = Date.now();
                 }}
                 onSessionLost={() => {
-                  // The broadcast ended. Go back to the door and see whether
-                  // somebody else has started one, or start one.
-                  setRole("idle");
+                  // The broadcast this viewer was watching ended. Rejoin
+                  // whatever is running now, or start one — never drop the
+                  // viewer back to a door they already walked through.
                   setAdoptSessionId(null);
-                  setOnAir(false);
-                  setMeta(null);
+                  void takeAir();
                 }}
                 onError={pushError}
               />
@@ -646,11 +685,7 @@ export function Broadcast() {
           {onAir && (
             <>
               <div className="overlay overlay-top">
-                <ChannelBug
-                  program={program}
-                  onAir={meta !== null}
-                  watching={watching}
-                />
+                <ChannelBug program={program} watching={watching} />
                 <Clock />
               </div>
               <div className="overlay overlay-bottom">
@@ -661,6 +696,11 @@ export function Broadcast() {
                 <div className="slate">
                   <span className="slate-text">Building the first segment…</span>
                 </div>
+              )}
+              {muted && role === "viewer" && (
+                <button type="button" className="unmute" onClick={() => setMuted(false)}>
+                  Tap for sound
+                </button>
               )}
             </>
           )}
