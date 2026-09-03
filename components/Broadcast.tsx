@@ -698,8 +698,13 @@ export function Broadcast() {
                 </div>
               )}
               {muted && role === "viewer" && (
-                <button type="button" className="unmute" onClick={() => setMuted(false)}>
-                  Tap for sound
+                <button
+                  type="button"
+                  className="unmute"
+                  onClick={() => setMuted(false)}
+                  aria-label="Turn on sound"
+                >
+                  <span>Tap for sound</span>
                 </button>
               )}
             </>

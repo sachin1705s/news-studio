@@ -957,23 +957,34 @@ body {
 }
 
 /* Viewers join muted; one tap brings the sound. */
+/* Above the video (z-index 2) and both overlays (4, 5) — without this the
+   button rendered behind the picture and could be neither seen nor clicked. */
 .unmute {
   position: absolute;
-  top: 50%;
-  left: 50%;
-  transform: translate(-50%, -50%);
-  padding: 12px 22px;
-  background: rgba(6, 8, 12, 0.82);
-  border: 1px solid rgba(255, 255, 255, 0.18);
+  inset: 0;
+  z-index: 6;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  /* The whole picture is the target, so nobody has to find a small button. */
+  width: 100%;
+  background: transparent;
+  border: 0;
   color: var(--ink);
   font-family: var(--mono);
   font-size: 12px;
   letter-spacing: 0.1em;
   text-transform: uppercase;
   cursor: pointer;
+}
+
+.unmute span {
+  padding: 12px 22px;
+  background: rgba(6, 8, 12, 0.82);
+  border: 1px solid rgba(255, 255, 255, 0.18);
   backdrop-filter: blur(6px);
 }
 
-.unmute:hover {
+.unmute:hover span {
   background: rgba(6, 8, 12, 0.94);
 }
