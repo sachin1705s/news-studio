@@ -145,10 +145,20 @@ export function Broadcast() {
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ author, text }),
         });
-        const body = (await res.json()) as { error?: string };
+        // Read as text first: a crashed route replies with an HTML error page,
+        // and calling res.json() on that throws, which used to be reported as
+        // an unreachable studio for a comment the studio had accepted.
+        const raw = await res.text();
+        let body: { error?: string; stored?: boolean } = {};
+        try {
+          body = JSON.parse(raw) as typeof body;
+        } catch {
+          return `The studio replied with something unreadable (${res.status}).`;
+        }
         if (!res.ok) return body.error ?? "Could not post that.";
         await loadComments();
-        return null;
+        // It is going on air regardless; say so plainly if it will not be kept.
+        return body.stored === false ? "On air, but not saved — storage is unavailable." : null;
       } catch {
         return "Could not reach the studio.";
       }
