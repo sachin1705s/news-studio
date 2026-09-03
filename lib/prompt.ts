@@ -25,11 +25,11 @@ const HEAD_TAIL_SECONDS = 1.6;
  */
 export const CLIP_TIERS = {
   /** Bumpers, links and viewer mail. */
-  brief: 8.5,
+  brief: 6.5,
   /** The anchor's read to camera. */
-  read: 12.25,
-  /** Cutaways and correspondent standups: the model's longest clip. */
-  footage: 14.375,
+  read: 9.5,
+  /** Cutaways and correspondent standups. */
+  footage: 11.0,
 } as const;
 
 export function wordBudget(clipSeconds: number): number {

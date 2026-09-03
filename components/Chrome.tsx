@@ -167,19 +167,15 @@ export function StatusRail({
 /**
  * The community.
  *
- * Comments are the audience's, so they are shown verbatim and credited. The
- * "read on air" switch is what makes this part of the channel rather than a
- * chat box beside it: with it on, one comment a block is handed to the anchor.
+ * Comments are the audience's, so they are shown verbatim and credited. Every
+ * one of them goes to the anchor, who answers it on air within about a minute —
+ * which is what makes this part of the channel rather than a chat box beside it.
  */
 export function CommunityPanel({
   comments,
-  onAir,
-  onToggleOnAir,
   onPost,
 }: {
   comments: Comment[];
-  onAir: boolean;
-  onToggleOnAir: (next: boolean) => void;
   onPost: (author: string, text: string) => Promise<string | null>;
 }) {
   const [author, setAuthor] = useState("");
@@ -191,14 +187,7 @@ export function CommunityPanel({
     <section className="panel">
       <div className="panel-head">
         <h2 className="panel-title">Community</h2>
-        <label className="switch">
-          <input
-            type="checkbox"
-            checked={onAir}
-            onChange={(e) => onToggleOnAir(e.target.checked)}
-          />
-          <span>Read on air</span>
-        </label>
+        <span className="panel-note-inline">Every comment goes on air</span>
       </div>
 
       <form

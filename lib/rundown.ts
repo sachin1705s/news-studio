@@ -156,7 +156,7 @@ function readFor(
  * a story told at the wrong length is worse than a story told plainly, and a
  * chatty producer must not be able to run three minutes on a passing mention.
  */
-const MAX_CUTS: Record<string, number> = { short: 1, medium: 3, long: 7 };
+const MAX_CUTS: Record<string, number> = { short: 1, medium: 2, long: 4 };
 
 /**
  * The cutaways a story gets, with the line spoken over each.

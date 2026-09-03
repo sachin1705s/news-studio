@@ -64,7 +64,6 @@ export function Broadcast() {
   /** An unattended run: keep transmitting even with the tab in the background. */
   const [transmitMode, setTransmitMode] = useState(false);
   const [comments, setComments] = useState<Comment[]>([]);
-  const [commentsOnAir, setCommentsOnAir] = useState(true);
 
   /** The channel opens on the startup desk for one block, then joins the wheel. */
   const [openingUntil, setOpeningUntil] = useState<number | null>(null);
@@ -76,15 +75,13 @@ export function Broadcast() {
   const liveRef = useRef<Slot>(0);
   const rotatingRef = useRef(false);
   const commentsRef = useRef<Comment[]>([]);
-  const commentsOnAirRef = useRef(true);
   // Mirrored after commit rather than during render: these are read by timers
   // and network callbacks, never while rendering.
   useEffect(() => {
     liveRef.current = live;
     rotatingRef.current = rotating;
     commentsRef.current = comments;
-    commentsOnAirRef.current = commentsOnAir;
-  }, [live, rotating, comments, commentsOnAir]);
+  }, [live, rotating, comments]);
 
   useEffect(() => {
     setTransmitMode(new URLSearchParams(window.location.search).get("transmit") === "1");
@@ -180,7 +177,6 @@ export function Broadcast() {
   }, []);
 
   const takeComment = useCallback(async (coverage: string[]): Promise<ViewerTake | null> => {
-    if (!commentsOnAirRef.current) return null;
     const unread = commentsRef.current.filter((c) => !c.readAt).sort((a, b) => a.at - b.at);
 
     for (const candidate of unread.slice(0, 3)) {
@@ -392,7 +388,6 @@ export function Broadcast() {
     [program, pushError, takeComment],
   );
 
-  const unread = comments.filter((c) => !c.readAt).length;
 
   return (
     <div className="app" style={{ ["--accent" as string]: program.accent }}>
@@ -479,12 +474,7 @@ export function Broadcast() {
           transmitMode={transmitMode}
         />
 
-        <CommunityPanel
-          comments={comments}
-          onAir={commentsOnAir}
-          onToggleOnAir={setCommentsOnAir}
-          onPost={postComment}
-        />
+        <CommunityPanel comments={comments} onPost={postComment} />
 
         <a
           className="powered"

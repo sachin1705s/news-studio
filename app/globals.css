@@ -937,3 +937,10 @@ body {
   letter-spacing: 0.06em;
   color: #ffb454;
 }
+
+.panel-note-inline {
+  font-family: var(--mono);
+  font-size: 10px;
+  letter-spacing: 0.06em;
+  color: var(--ink-faint);
+}

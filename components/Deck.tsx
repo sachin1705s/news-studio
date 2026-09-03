@@ -8,6 +8,7 @@ import {
   FastH3Provider,
   useFastH3,
   useFastH3ClipFailed,
+  useFastH3ClipGenerated,
   useFastH3ClipStarted,
   useFastH3CommandError,
   useFastH3StateUpdate,
@@ -189,7 +190,7 @@ function DeckInner({
   onError,
   live,
 }: DeckProps) {
-  const { status, sendCommand, setCanvas, setAutoplay, setClipSeconds, setFlushOnClipEnd, setSeed, enqueue, uploadFile } =
+  const { status, sendCommand, setCanvas, setAutoplay, setClipSeconds, setFlushOnClipEnd, setSeed, enqueue, move, uploadFile } =
     useFastH3();
 
   const [configured, setConfigured] = useState(false);
@@ -228,6 +229,9 @@ function DeckInner({
   const producerWarned = useRef(false);
   const reportedLoss = useRef(false);
   const capacity = useRef({ free: 0 });
+  /** Viewer clips waiting to be built, so they can jump the playout queue too. */
+  const jumping = useRef<Set<string>>(new Set());
+  const answering = useRef(false);
   /** Uploaded press photographs, keyed by story id: one upload per story, not per clip. */
   const frames = useRef<Map<string, FileRef | null>>(new Map());
 
@@ -457,32 +461,10 @@ function DeckInner({
 
     const rundown = buildRundown(pool, program, strand, cycle.current++, produced);
 
-    // Viewer mail runs at most once a block, after the first story, so the
-    // channel acknowledges its audience without becoming a comments feed. The
-    // anchor answers rather than recites: the reply is written against what has
-    // actually been broadcast, and a comment with no answer worth making is
-    // never queued at all.
-    const take = await takeComment(coverage.current.slice(-12));
-    if (take) {
-      const at = rundown.findIndex((s) => s.kind === "story");
-      if (at >= 0) {
-        rundown.splice(at + 1, 0, {
-          programId: program.id,
-          strandId: strand.id,
-          id: `${program.id}-${strand.id}-${cycle.current}-viewer-${take.id}`,
-          kind: "viewer",
-          slug: `${take.author} writes`,
-          strap: "From the R24 community",
-          author: take.author,
-          script: `${take.author} writes: ${take.text} ${take.reply}`,
-        });
-      }
-    }
-
     pending.current = rundown;
     block.current = rundown;
     onQueuePreview(block.current.slice(0, 12));
-  }, [gather, onQueuePreview, onError, openingUntil, program, takeComment, usedStoryIds]);
+  }, [gather, onQueuePreview, onError, openingUntil, program, usedStoryIds]);
 
   /**
    * The picture a cutaway starts from.
@@ -567,6 +549,82 @@ function DeckInner({
       feeding.current = false;
     }
   }, [configured, enqueue, frameFor, onError, openingUntil, program, refill]);
+
+  /**
+   * Answer the audience while the answer still means something.
+   *
+   * A comment used to wait for the next refill, which is minutes of airtime
+   * away — by then the story it was about has gone. Instead each comment is
+   * built the moment it arrives and pushed to the front of both queues:
+   * `position: 0` on enqueue makes it the next clip to build, and moving it on
+   * `clip_generated` makes it the next to play, because a clip that builds
+   * first still joins the BACK of the playout queue.
+   *
+   * That puts a viewer on air about forty seconds after they post: the build,
+   * plus whatever is left of the clip currently playing.
+   */
+  const answerViewers = useCallback(async () => {
+    if (!configured || answering.current) return;
+    answering.current = true;
+    try {
+      const take = await takeComment(coverage.current.slice(-12));
+      if (!take) return;
+
+      const { strand } = strandOnAir(openingUntil, new Date());
+      const segment: Segment = {
+        programId: program.id,
+        strandId: strand.id,
+        id: `viewer-${take.id}`,
+        kind: "viewer",
+        slug: `${take.author} writes`,
+        strap: "From the R24 community",
+        author: take.author,
+        script: `${take.author} writes: ${take.text} ${take.reply}`,
+      };
+
+      const meta: ClipMeta = {
+        id: segment.id,
+        slug: segment.slug,
+        strap: segment.strap,
+        kind: segment.kind,
+        program: program.name,
+        strand: strand.name,
+        kicker: strand.kicker,
+        author: segment.author,
+      };
+
+      const seconds = clipSecondsFor(segment, clipSeconds.current);
+      const queued = await enqueue({
+        prompt: buildPrompt(segment, program, seconds, !!still.current),
+        seconds,
+        metadata: JSON.stringify(meta),
+        position: 0,
+        ...(still.current ? { starting_frame: still.current } : {}),
+      });
+
+      const clipId = queued?.clip?.clip_id;
+      if (clipId) jumping.current.add(clipId);
+    } catch (err) {
+      onError(err instanceof Error ? err.message : "Could not put that comment on air.");
+    } finally {
+      answering.current = false;
+    }
+  }, [configured, enqueue, onError, openingUntil, program, takeComment]);
+
+  // Comments arrive between blocks, so this runs on its own clock.
+  useEffect(() => {
+    if (!configured) return;
+    const id = setInterval(() => void answerViewers(), 12_000);
+    return () => clearInterval(id);
+  }, [configured, answerViewers]);
+
+  /** A viewer clip has been built: put it at the front of the playout queue. */
+  useFastH3ClipGenerated((message) => {
+    const clipId = message.clip.clip_id;
+    if (!jumping.current.has(clipId)) return;
+    jumping.current.delete(clipId);
+    void move({ clip_id: clipId, position: 0 }).catch(() => {});
+  });
 
   useFastH3StateUpdate((state) => {
     sessionState.current = state;
