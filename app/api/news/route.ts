@@ -127,18 +127,53 @@ function linkHref(v: unknown): string {
   return "";
 }
 
+/** The handful of named entities wire feeds actually emit. */
+const NAMED_ENTITIES: Record<string, string> = {
+  amp: "&",
+  lt: "<",
+  gt: ">",
+  quot: '"',
+  apos: "'",
+  nbsp: " ",
+  hellip: "\u2026",
+  mdash: "\u2014",
+  ndash: "\u2013",
+  lsquo: "\u2018",
+  rsquo: "\u2019",
+  ldquo: "\u201C",
+  rdquo: "\u201D",
+  pound: "\u00A3",
+  euro: "\u20AC",
+};
+
+/**
+ * Strip markup and decode entities.
+ *
+ * Feeds emit numeric entities far more often than named ones — `&#8217;` for an
+ * apostrophe is near universal — and this text becomes the anchor's spoken
+ * script, so anything left encoded is read aloud as literal punctuation names.
+ * Decoding runs last so an entity that encodes a bracket cannot reintroduce a
+ * tag after the markup has been removed.
+ */
 function stripHtml(s: string): string {
   return s
     .replace(/<[^>]*>/g, " ")
-    .replace(/&nbsp;/g, " ")
-    .replace(/&amp;/g, "&")
-    .replace(/&quot;/g, '"')
-    .replace(/&#39;/g, "'")
-    .replace(/&lt;/g, "<")
-    .replace(/&gt;/g, ">")
+    .replace(/&#(\d+);/g, (_, code) => safeChar(Number(code)))
+    .replace(/&#[xX]([0-9a-fA-F]+);/g, (_, hex) => safeChar(parseInt(hex, 16)))
+    .replace(/&([a-zA-Z]+);/g, (match, name: string) => NAMED_ENTITIES[name.toLowerCase()] ?? match)
     .replace(/\s+/g, " ")
     .trim();
 }
+
+function safeChar(code: number): string {
+  if (!Number.isFinite(code) || code < 32 || code > 0x10ffff) return " ";
+  try {
+    return String.fromCodePoint(code);
+  } catch {
+    return " ";
+  }
+}
+
 
 /** Four outlets running the same story shouldn't get four segments. */
 function dedupeKey(title: string): string {
