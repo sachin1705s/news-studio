@@ -40,6 +40,8 @@ interface DeckProps {
   /** Story ids already broadcast, shared across decks so a rotation doesn't repeat itself. */
   usedStoryIds: React.MutableRefObject<Set<string>>;
   onPictureLive: () => void;
+  /** The session ended — expired, evicted, or dropped. The channel needs a new one. */
+  onSessionLost: () => void;
   onSegment: (meta: ClipMeta) => void;
   onStats: (stats: DeckStats) => void;
   onQueuePreview: (segments: Segment[]) => void;
@@ -78,19 +80,31 @@ export function Deck(props: DeckProps) {
 
 /** A bulletin read lands ~20 words; the model clamps this to what it can build. */
 const TARGET_CLIP_SECONDS = 12;
+/** A readiness probe that has not answered in this long is treated as lost. */
+const PROBE_TIMEOUT_MS = 8000;
+
+function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise<T> {
+  return Promise.race([
+    promise,
+    new Promise<never>((_, reject) =>
+      setTimeout(() => reject(new Error(`${label} timed out after ${ms}ms`)), ms),
+    ),
+  ]);
+}
 
 function DeckInner({
   program,
   anchorStill,
   usedStoryIds,
   onPictureLive,
+  onSessionLost,
   onSegment,
   onStats,
   onQueuePreview,
   onError,
   live,
 }: DeckProps) {
-  const { getState, setCanvas, setAutoplay, setClipSeconds, setFlushOnClipEnd, setSeed, enqueue, uploadFile } =
+  const { status, getState, setCanvas, setAutoplay, setClipSeconds, setFlushOnClipEnd, setSeed, enqueue, uploadFile } =
     useFastH3();
 
   const [configured, setConfigured] = useState(false);
@@ -100,23 +114,37 @@ function DeckInner({
   const cycle = useRef(0);
   const feeding = useRef(false);
   const sawPicture = useRef(false);
+  const reportedLoss = useRef(false);
   const capacity = useRef({ free: 0 });
 
   /**
    * The SDK's status event is known to skip waiting -> ready, so readiness is
    * probed directly: `get_state` is refused until the session is up, and the
    * first reply that comes back is the signal to configure.
+   *
+   * The probe is raced against a timeout. `sendCommand` awaits the model's
+   * reply, and a command sent before the GPU is assigned can sit unanswered
+   * rather than being refused — without the race a single hung probe would
+   * deadlock the deck forever, with the retry below never reached.
    */
   useEffect(() => {
     let cancelled = false;
     let timer: ReturnType<typeof setTimeout>;
+    let attempts = 0;
 
     const attempt = async () => {
       if (cancelled) return;
+      attempts += 1;
       try {
-        const state = await getState();
-        if (!state) throw new Error("no state");
+        const state = await withTimeout(getState(), PROBE_TIMEOUT_MS, "get_state");
+        if (!state) throw new Error("get_state returned no state");
         if (cancelled) return;
+        console.debug(`[deck] ready after ${attempts} probe(s)`, {
+          aspect: state.aspect,
+          clipSeconds: `${state.clip_seconds_min}-${state.clip_seconds_max}`,
+          generation: state.generation_capacity,
+          playout: state.playout_capacity,
+        });
 
         clipSeconds.current = Math.min(
           Math.max(TARGET_CLIP_SECONDS, state.clip_seconds_min),
@@ -142,8 +170,17 @@ function DeckInner({
 
         await setAutoplay({ enabled: true });
         if (!cancelled) setConfigured(true);
-      } catch {
-        timer = setTimeout(attempt, 500);
+      } catch (err) {
+        const reason = err instanceof Error ? err.message : String(err);
+        // Refusals before the GPU is assigned are expected; log sparsely so the
+        // pattern is visible without burying the console.
+        if (attempts === 1 || attempts % 10 === 0) {
+          console.debug(`[deck] not ready yet (probe ${attempts}): ${reason}`);
+        }
+        if (attempts === 40) {
+          onError("The session has not come up after a minute. Still trying.");
+        }
+        timer = setTimeout(attempt, 1500);
       }
     };
 
@@ -224,6 +261,23 @@ function DeckInner({
     const id = setInterval(() => void topUp(), 4000);
     return () => clearInterval(id);
   }, [configured, topUp]);
+
+  /**
+   * A session that has been up and then reports disconnected is gone: the SDK
+   * reconnects a recoverable drop on its own, so reaching this state means it
+   * could not. Reported once — the parent tears this deck down in response.
+   */
+  useEffect(() => {
+    console.debug(`[deck] status: ${status}`);
+  }, [status]);
+
+  useEffect(() => {
+    if (!configured || reportedLoss.current) return;
+    if (status === "disconnected") {
+      reportedLoss.current = true;
+      onSessionLost();
+    }
+  }, [status, configured, onSessionLost]);
 
   useFastH3ClipStarted((message) => {
     if (!sawPicture.current) {

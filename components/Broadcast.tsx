@@ -16,15 +16,21 @@ import {
 } from "./Chrome";
 
 /**
- * Reactor ends a session at 20 minutes. To keep one continuous channel, two
- * decks are run against the clock: the standby deck is brought up and left to
- * build and play off-air, and once it has real picture the channel cuts to it
- * and the spent session is dropped. Nothing on screen stops.
+ * Two decks keep one unbroken channel across session boundaries.
+ *
+ * A session can be minted for up to 24 hours, so rotation is not the routine
+ * event it would be under a short cap — it is a hedge. The channel rotates on
+ * a long planned interval, and reacts immediately if a session dies before it.
+ *
+ * Either way the mechanism is the same: bring the standby deck up early, let it
+ * build and play off-air, and cut to it only once it has real picture. Cutting
+ * to a deck that is already showing something is what removes the seam.
  */
-const HARD_LIMIT_MS = 20 * 60_000;
-const PREROLL_AT_MS = 15.5 * 60_000;
-/** If the standby deck never produces picture, cut anyway rather than run into the cap. */
-const FORCE_CUT_AT_MS = 18.5 * 60_000;
+const PLANNED_SESSION_MS = Number(process.env.NEXT_PUBLIC_ROTATE_MINUTES ?? 50) * 60_000;
+/** A standby deck needs roughly one clip build to have picture. 90s is generous. */
+const PREROLL_LEAD_MS = 90_000;
+/** Don't strand the channel on a standby deck that never came up. */
+const PREROLL_GIVE_UP_MS = 4 * 60_000;
 
 type Slot = 0 | 1;
 const other = (s: Slot): Slot => (s === 0 ? 1 : 0);
@@ -45,6 +51,7 @@ export function Broadcast() {
   const [still, setStill] = useState<{ blob: Blob; url: string } | null>(null);
 
   const airStart = useRef<number | null>(null);
+  const prerollStart = useRef<number | null>(null);
   const usedStoryIds = useRef<Set<string>>(new Set());
   const liveRef = useRef<Slot>(0);
   const rotatingRef = useRef(false);
@@ -81,6 +88,32 @@ export function Broadcast() {
     });
   }, []);
 
+  const beginPreroll = useCallback(() => {
+    if (rotatingRef.current) return;
+    setRotating(true);
+    prerollStart.current = Date.now();
+    setMounted((prev) => {
+      const next: [boolean, boolean] = [...prev];
+      next[other(liveRef.current)] = true;
+      return next;
+    });
+  }, []);
+
+  /**
+   * The on-air session dropped. There is no warm deck to cut to yet, so the
+   * channel shows a slate for as long as the standby takes to build its first
+   * clip. Nothing is gained by waiting for the planned interval.
+   */
+  const handleSessionLost = useCallback(
+    (slot: Slot) => {
+      if (slot !== liveRef.current) return;
+      pushError("The on-air session ended. Bringing up a fresh one.");
+      setMeta(null);
+      beginPreroll();
+    },
+    [beginPreroll, pushError],
+  );
+
   const handlePictureLive = useCallback(
     (slot: Slot) => {
       if (slot === liveRef.current) {
@@ -89,6 +122,7 @@ export function Broadcast() {
         return;
       }
       // The standby deck has picture — take it.
+      prerollStart.current = null;
       cutTo(slot);
     },
     [cutTo],
@@ -103,30 +137,29 @@ export function Broadcast() {
       const elapsed = Date.now() - started;
       setAirtime(elapsed / 1000);
 
-      const standby = other(liveRef.current);
-      if (elapsed >= PREROLL_AT_MS && !rotatingRef.current) {
-        setRotating(true);
+      if (elapsed >= PLANNED_SESSION_MS - PREROLL_LEAD_MS && !rotatingRef.current) {
+        beginPreroll();
+      }
+      // A standby that has not produced picture in four minutes is not coming up.
+      // Drop it and try again from scratch rather than hold two dead sessions.
+      if (prerollStart.current !== null && Date.now() - prerollStart.current > PREROLL_GIVE_UP_MS) {
+        prerollStart.current = null;
+        setRotating(false);
+        const standby = other(liveRef.current);
         setMounted((prev) => {
           const next: [boolean, boolean] = [...prev];
-          next[standby] = true;
+          next[standby] = false;
           return next;
         });
-      }
-      if (elapsed >= FORCE_CUT_AT_MS && rotatingRef.current) {
-        cutTo(standby);
-      }
-      if (elapsed >= HARD_LIMIT_MS) {
-        // The session is gone; restart the current slot rather than sit on a dead feed.
-        airStart.current = Date.now();
         setEpoch((prev) => {
           const next: [number, number] = [...prev];
-          next[liveRef.current] += 1;
+          next[standby] += 1;
           return next;
         });
       }
     }, 500);
     return () => clearInterval(id);
-  }, [onAir, cutTo]);
+  }, [onAir, cutTo, beginPreroll]);
 
   const takeAir = useCallback(() => {
     setOnAir(true);
@@ -169,6 +202,7 @@ export function Broadcast() {
                   {...deckProps}
                   live={live === slot}
                   onPictureLive={() => handlePictureLive(slot)}
+                  onSessionLost={() => handleSessionLost(slot)}
                   onSegment={(m) => {
                     if (liveRef.current === slot) setMeta(m);
                   }}
