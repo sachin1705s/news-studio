@@ -8,7 +8,6 @@ import {
   FastH3Provider,
   useFastH3,
   useFastH3ClipFailed,
-  useFastH3ClipGenerated,
   useFastH3ClipStarted,
   useFastH3CommandError,
   useFastH3StateUpdate,
@@ -124,6 +123,20 @@ const TARGET_CLIP_SECONDS = 12;
 const RETIRE_MS = 6 * 60 * 60 * 1000;
 
 /**
+ * How far ahead the channel commits its running order.
+ *
+ * The generation queue holds twenty, and filling it meant the next three
+ * minutes were decided before a viewer had finished typing — nothing could be
+ * slotted in without shoving it in front of a story already half told. Keeping
+ * a shallower buffer is what lets the anchor turn to the audience between
+ * stories instead of interrupting one.
+ *
+ * Eight clips is roughly ninety seconds of picture: enough that a slow build
+ * cannot open a hole, short enough that a comment waits a story, not a block.
+ */
+const MAX_LOOKAHEAD = 8;
+
+/**
  * Crop a publisher's photograph to the canvas shape.
  *
  * A starting frame has to match the session's aspect or the model letterboxes
@@ -190,7 +203,7 @@ function DeckInner({
   onError,
   live,
 }: DeckProps) {
-  const { status, sendCommand, setCanvas, setAutoplay, setClipSeconds, setFlushOnClipEnd, setSeed, enqueue, move, uploadFile } =
+  const { status, sendCommand, setCanvas, setAutoplay, setClipSeconds, setFlushOnClipEnd, setSeed, enqueue, uploadFile } =
     useFastH3();
 
   const [configured, setConfigured] = useState(false);
@@ -229,9 +242,10 @@ function DeckInner({
   const producerWarned = useRef(false);
   const reportedLoss = useRef(false);
   const capacity = useRef({ free: 0 });
-  /** Viewer clips waiting to be built, so they can jump the playout queue too. */
-  const jumping = useRef<Set<string>>(new Set());
-  const answering = useRef(false);
+  /** Clips committed but not yet aired: generation queue plus playout queue. */
+  const ahead = useRef(0);
+  /** The package currently being fed, so boundaries can be spotted. */
+  const lastPackage = useRef<string | null>(null);
   /** Uploaded press photographs, keyed by story id: one upload per story, not per clip. */
   const frames = useRef<Map<string, FileRef | null>>(new Map());
 
@@ -500,88 +514,10 @@ function DeckInner({
   );
 
   /** Keep the generation queue as full as the model will allow. */
-  const topUp = useCallback(async () => {
-    if (!configured || feeding.current) return;
-    feeding.current = true;
-    try {
-      while (capacity.current.free > 0) {
-        if (pending.current.length === 0) await refill();
-        const segment = pending.current.shift();
-        if (!segment) break;
-
-        const strand = strandOnAir(openingUntil, new Date()).strand;
-        const meta: ClipMeta = {
-          id: segment.id,
-          slug: segment.slug,
-          strap: segment.strap,
-          kind: segment.kind,
-          program: program.name,
-          strand: strand.name,
-          kicker: strand.kicker,
-          location: segment.location,
-          breaking: segment.breaking,
-          author: segment.author,
-        };
-
-        // The anchor still opens anchor shots only. A cutaway and a reporter
-        // standup are different scenes entirely, so seeding either from the
-        // studio frame would fight the shot.
-        const inStudio = segment.kind !== "broll" && segment.kind !== "reporter";
-        const startingFrame = inStudio
-          ? still.current
-          : segment.kind === "broll"
-            ? await frameFor(segment.story)
-            : null;
-
-        const seconds = clipSecondsFor(segment, clipSeconds.current);
-
-        await enqueue({
-          prompt: buildPrompt(segment, program, seconds, inStudio && !!still.current),
-          seconds,
-          metadata: JSON.stringify(meta),
-          ...(startingFrame ? { starting_frame: startingFrame } : {}),
-        });
-        capacity.current.free -= 1;
-      }
-    } catch (err) {
-      onError(err instanceof Error ? err.message : "Failed to queue a segment.");
-    } finally {
-      feeding.current = false;
-    }
-  }, [configured, enqueue, frameFor, onError, openingUntil, program, refill]);
-
-  /**
-   * Answer the audience while the answer still means something.
-   *
-   * A comment used to wait for the next refill, which is minutes of airtime
-   * away — by then the story it was about has gone. Instead each comment is
-   * built the moment it arrives and pushed to the front of both queues:
-   * `position: 0` on enqueue makes it the next clip to build, and moving it on
-   * `clip_generated` makes it the next to play, because a clip that builds
-   * first still joins the BACK of the playout queue.
-   *
-   * That puts a viewer on air about forty seconds after they post: the build,
-   * plus whatever is left of the clip currently playing.
-   */
-  const answerViewers = useCallback(async () => {
-    if (!configured || answering.current) return;
-    answering.current = true;
-    try {
-      const take = await takeComment(coverage.current.slice(-12));
-      if (!take) return;
-
-      const { strand } = strandOnAir(openingUntil, new Date());
-      const segment: Segment = {
-        programId: program.id,
-        strandId: strand.id,
-        id: `viewer-${take.id}`,
-        kind: "viewer",
-        slug: `${take.author} writes`,
-        strap: "From the R24 community",
-        author: take.author,
-        script: `${take.author} writes: ${take.text} ${take.reply}`,
-      };
-
+  /** Queue one segment for building. */
+  const queueSegment = useCallback(
+    async (segment: Segment) => {
+      const strand = strandOnAir(openingUntil, new Date()).strand;
       const meta: ClipMeta = {
         id: segment.id,
         slug: segment.slug,
@@ -590,46 +526,100 @@ function DeckInner({
         program: program.name,
         strand: strand.name,
         kicker: strand.kicker,
+        location: segment.location,
+        breaking: segment.breaking,
         author: segment.author,
       };
 
+      // The anchor still opens anchor shots only. A cutaway and a reporter
+      // standup are different scenes entirely, so seeding either from the
+      // studio frame would fight the shot.
+      const inStudio = segment.kind !== "broll" && segment.kind !== "reporter";
+      const startingFrame = inStudio
+        ? still.current
+        : segment.kind === "broll"
+          ? await frameFor(segment.story)
+          : null;
+
       const seconds = clipSecondsFor(segment, clipSeconds.current);
-      const queued = await enqueue({
-        prompt: buildPrompt(segment, program, seconds, !!still.current),
+
+      await enqueue({
+        prompt: buildPrompt(segment, program, seconds, inStudio && !!still.current),
         seconds,
         metadata: JSON.stringify(meta),
-        position: 0,
-        ...(still.current ? { starting_frame: still.current } : {}),
+        ...(startingFrame ? { starting_frame: startingFrame } : {}),
       });
+      capacity.current.free -= 1;
+      ahead.current += 1;
+    },
+    [enqueue, frameFor, openingUntil, program],
+  );
 
-      const clipId = queued?.clip?.clip_id;
-      if (clipId) jumping.current.add(clipId);
+  /**
+   * The next comment the anchor has something to say about, written as a
+   * segment. Null when the audience is quiet or nothing is worth answering.
+   */
+  const nextViewerSegment = useCallback(async (): Promise<Segment | null> => {
+    const take = await takeComment(coverage.current.slice(-12));
+    if (!take) return null;
+
+    const strand = strandOnAir(openingUntil, new Date()).strand;
+    return {
+      programId: program.id,
+      strandId: strand.id,
+      id: `viewer-${take.id}`,
+      kind: "viewer",
+      slug: `${take.author} writes`,
+      strap: "From the R24 community",
+      author: take.author,
+      script: `${take.author} writes: ${take.text} ${take.reply}`,
+    };
+  }, [openingUntil, program.id, takeComment]);
+
+  /**
+   * Keep the running order fed, and hand to the audience between stories.
+   *
+   * The channel commits only a short way ahead, so this runs constantly rather
+   * than emptying a block into the queue in one pass. At each package boundary
+   * — the moment one story is fully queued and the next has not started — the
+   * audience gets the floor. That is what makes the anchor answer viewers
+   * between stories rather than cutting into the middle of one.
+   */
+  const topUp = useCallback(async () => {
+    if (!configured || feeding.current) return;
+    feeding.current = true;
+    try {
+      while (capacity.current.free > 0 && ahead.current < MAX_LOOKAHEAD) {
+        if (pending.current.length === 0) await refill();
+        const next = pending.current[0];
+        if (!next) break;
+
+        // A new story is about to start. Before it does, take a comment.
+        const boundary = Boolean(next.packageId) && next.packageId !== lastPackage.current;
+        if (boundary) {
+          lastPackage.current = next.packageId ?? null;
+          const viewer = await nextViewerSegment();
+          if (viewer) {
+            await queueSegment(viewer);
+            continue;
+          }
+        }
+
+        pending.current.shift();
+        await queueSegment(next);
+      }
     } catch (err) {
-      onError(err instanceof Error ? err.message : "Could not put that comment on air.");
+      onError(err instanceof Error ? err.message : "Failed to queue a segment.");
     } finally {
-      answering.current = false;
+      feeding.current = false;
     }
-  }, [configured, enqueue, onError, openingUntil, program, takeComment]);
-
-  // Comments arrive between blocks, so this runs on its own clock.
-  useEffect(() => {
-    if (!configured) return;
-    const id = setInterval(() => void answerViewers(), 12_000);
-    return () => clearInterval(id);
-  }, [configured, answerViewers]);
-
-  /** A viewer clip has been built: put it at the front of the playout queue. */
-  useFastH3ClipGenerated((message) => {
-    const clipId = message.clip.clip_id;
-    if (!jumping.current.has(clipId)) return;
-    jumping.current.delete(clipId);
-    void move({ clip_id: clipId, position: 0 }).catch(() => {});
-  });
+  }, [configured, nextViewerSegment, onError, queueSegment, refill]);
 
   useFastH3StateUpdate((state) => {
     sessionState.current = state;
     if (!stateArrived) setStateArrived(true);
     capacity.current.free = state.generation_capacity - state.generation_queued;
+    ahead.current = state.generation_queued + state.playout_queued;
     onStats({
       building: state.generation_queued,
       buildCapacity: state.generation_capacity,
