@@ -20,9 +20,21 @@ import { ReactorMark } from "./ReactorMark";
  * build and play off-air, and cut to it only once it has real picture. Cutting
  * to a deck that is already showing something is what removes the seam.
  */
-const PLANNED_SESSION_MS = Number(process.env.NEXT_PUBLIC_ROTATE_MINUTES ?? 50) * 60_000;
+/**
+ * Rotation is off.
+ *
+ * It existed to hand over before a session's ceiling by bringing a second deck
+ * up early and cutting to it once it had picture — which means two GPUs billing
+ * at once, deliberately, every rotation. That is the opposite of running one
+ * stream and nothing more, and at 70 credits a second the overlap is not a
+ * rounding error. The session ceiling is an hour; when it ends the channel
+ * restarts, and a viewer sees a gap rather than a seam.
+ */
+const ROTATION_ENABLED = false;
+
 /** A standby deck needs roughly one clip build to have picture. 90s is generous. */
 const PREROLL_LEAD_MS = 90_000;
+
 /** Don't strand the channel on a standby deck that never came up. */
 const PREROLL_GIVE_UP_MS = 4 * 60_000;
 
@@ -502,7 +514,7 @@ export function Broadcast() {
       const elapsed = Date.now() - started;
       setAirtime(elapsed / 1000);
 
-      if (elapsed >= PLANNED_SESSION_MS - PREROLL_LEAD_MS && !rotatingRef.current) {
+      if (ROTATION_ENABLED && !rotatingRef.current) {
         beginPreroll();
       }
       // A standby that has not produced picture in four minutes is not coming up.

@@ -101,10 +101,20 @@ async function fetchToken(adopt: string | null): Promise<string> {
 
   const request = (async () => {
     try {
+      // The origin id identifies this browser to the token gate, so the
+      // browser already holding the channel can renew while everyone else is
+      // refused.
+      let originId = "";
+      try {
+        originId = window.localStorage.getItem("r24.origin") ?? "";
+      } catch {
+        originId = "";
+      }
+
       const res = await fetch("/api/reactor/token", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(adopt ? { sessionId: adopt } : {}),
+        body: JSON.stringify(adopt ? { sessionId: adopt } : { originId }),
       });
       const body = await res.json();
       if (!res.ok) throw new Error(body?.error ?? `Token request failed (${res.status})`);

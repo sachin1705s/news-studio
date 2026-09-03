@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import { readJson } from "@/lib/store";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -40,18 +41,53 @@ export async function POST(request: Request) {
   }
 
   let sessionId: string | undefined;
+  let originId = "";
   try {
-    const body = (await request.json()) as { sessionId?: unknown };
+    const body = (await request.json()) as { sessionId?: unknown; originId?: unknown };
     if (typeof body?.sessionId === "string" && body.sessionId) sessionId = body.sessionId;
+    if (typeof body?.originId === "string") originId = body.originId;
   } catch {
     // No body is the origin case.
+  }
+
+  // The origin gate. A browser cannot start a broadcast without a token, and
+  // this is the only place tokens come from — so refusing here is the one
+  // control that actually holds. Everything client-side is advisory: a stale
+  // read, a lost race or a hand-edited page can all get past it.
+  if (!sessionId) {
+    const live = await readJson<{
+      sessionId: string | null;
+      originId: string;
+      heartbeatAt: number;
+      startedAt: number;
+    } | null>("channel", null);
+
+    const held =
+      live &&
+      (live.sessionId
+        ? Date.now() - live.heartbeatAt <= 5 * 60_000
+        : Date.now() - live.startedAt <= 60_000);
+
+    if (held && live && live.originId !== originId) {
+      return NextResponse.json(
+        {
+          error: "A broadcast is already running. Watch that one instead.",
+          sessionId: live.sessionId,
+        },
+        { status: 409 },
+      );
+    }
   }
 
   const constraints: Record<string, number> = sessionId
     ? // A viewer never needs to create one. The floor the API accepts is 1, so
       // this cannot be zero — a short expiry is what bounds it instead.
       { max_sessions: 1 }
-    : { max_sessions: 24, max_session_duration_seconds: MAX_SESSION_SECONDS };
+    : // One session per token, enforced by Reactor rather than by us. Even if
+      // two browsers somehow hold the same origin token, the second create is
+      // refused server-side, which is a guarantee no amount of client-side
+      // coordination can give.
+      { max_sessions: 1, max_session_duration_seconds: MAX_SESSION_SECONDS };
 
   const res = await fetch("https://api.reactor.inc/tokens", {
     method: "POST",
