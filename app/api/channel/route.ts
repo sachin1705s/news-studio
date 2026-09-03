@@ -18,8 +18,16 @@ export const dynamic = "force-dynamic";
  */
 const KEY = "channel";
 
-/** A registration is stale if the origin has not refreshed it recently. */
-const STALE_MS = 90_000;
+/**
+ * A registration is stale if the origin has not refreshed it recently.
+ *
+ * Generous on purpose. This exists only to notice an origin that has genuinely
+ * gone, and the cost of being impatient is the expensive mistake: a live
+ * broadcast whose registration lapsed sends the next visitor off to start a
+ * second GPU session. A background tab can have its timers throttled to once a
+ * minute, so ninety seconds was not enough room.
+ */
+const STALE_MS = 5 * 60_000;
 
 interface Registration {
   sessionId: string;

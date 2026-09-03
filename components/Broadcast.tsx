@@ -84,6 +84,7 @@ export function Broadcast() {
   const airStart = useRef<number | null>(null);
   /** The session id of the broadcast this browser created, once it has one. */
   const liveSessionId = useRef<string | null>(null);
+  const lastRegisterAt = useRef(0);
   const prerollStart = useRef<number | null>(null);
   /** Story id -> when it last went to air, so a long run does not loop. */
   const usedStoryIds = useRef<Map<string, number>>(new Map());
@@ -145,7 +146,9 @@ export function Broadcast() {
    * in the moments between the check and the session coming up — so this
    * browser stands down and watches theirs instead of running a second stream.
    */
-  const registerChannel = useCallback(async (sessionId: string) => {
+  const registerChannel = useCallback(async (sessionId: string, force = false) => {
+    if (!force && Date.now() - lastRegisterAt.current < 20_000) return;
+    lastRegisterAt.current = Date.now();
     try {
       const res = await fetch("/api/channel", {
         method: "POST",
@@ -173,7 +176,7 @@ export function Broadcast() {
     if (role !== "origin" || !onAir) return;
     const id = setInterval(() => {
       const sid = liveSessionId.current;
-      if (sid) void registerChannel(sid);
+      if (sid) void registerChannel(sid, true);
     }, 30_000);
 
     const retire = () => {
@@ -598,6 +601,12 @@ export function Broadcast() {
                   onSessionLost={() => handleSessionLost(slot)}
                   onSegment={(m) => {
                     if (liveRef.current === slot) setMeta(m);
+                    // Driven by the picture rather than a timer: a backgrounded
+                    // tab has its intervals throttled to about once a minute,
+                    // which let the registration lapse and invited the next
+                    // visitor to start a second session.
+                    const sid = liveSessionId.current;
+                    if (sid) void registerChannel(sid);
                   }}
                   onStats={(s) => {
                     if (liveRef.current === slot) setStats(s);
@@ -639,7 +648,7 @@ export function Broadcast() {
               <div className="overlay overlay-top">
                 <ChannelBug
                   program={program}
-                  onAir={stats !== null && meta !== null}
+                  onAir={meta !== null}
                   watching={watching}
                 />
                 <Clock />
