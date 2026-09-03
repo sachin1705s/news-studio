@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { FileRef } from "@reactor-team/js-sdk";
+import type { FastH3StateUpdateMessage } from "@reactor-models/fast-h3";
 import {
   FastH3MainVideoView,
   FastH3Provider,
@@ -80,18 +81,6 @@ export function Deck(props: DeckProps) {
 
 /** A bulletin read lands ~20 words; the model clamps this to what it can build. */
 const TARGET_CLIP_SECONDS = 12;
-/** A readiness probe that has not answered in this long is treated as lost. */
-const PROBE_TIMEOUT_MS = 8000;
-
-function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise<T> {
-  return Promise.race([
-    promise,
-    new Promise<never>((_, reject) =>
-      setTimeout(() => reject(new Error(`${label} timed out after ${ms}ms`)), ms),
-    ),
-  ]);
-}
-
 function DeckInner({
   program,
   anchorStill,
@@ -104,10 +93,14 @@ function DeckInner({
   onError,
   live,
 }: DeckProps) {
-  const { status, getState, setCanvas, setAutoplay, setClipSeconds, setFlushOnClipEnd, setSeed, enqueue, uploadFile } =
+  const { status, sendCommand, setCanvas, setAutoplay, setClipSeconds, setFlushOnClipEnd, setSeed, enqueue, uploadFile } =
     useFastH3();
 
   const [configured, setConfigured] = useState(false);
+  /** Flips once so the configure effect re-runs when the first broadcast lands. */
+  const [stateArrived, setStateArrived] = useState(false);
+  const sessionState = useRef<FastH3StateUpdateMessage | null>(null);
+  const configuring = useRef(false);
   const clipSeconds = useRef(TARGET_CLIP_SECONDS);
   const still = useRef<FileRef | null>(null);
   const pending = useRef<Segment[]>([]);
@@ -118,28 +111,33 @@ function DeckInner({
   const capacity = useRef({ free: 0 });
 
   /**
-   * The SDK's status event is known to skip waiting -> ready, so readiness is
-   * probed directly: `get_state` is refused until the session is up, and the
-   * first reply that comes back is the signal to configure.
+   * Configure the session once the GPU is assigned.
    *
-   * The probe is raced against a timeout. `sendCommand` awaits the model's
-   * reply, and a command sent before the GPU is assigned can sit unanswered
-   * rather than being refused — without the race a single hung probe would
-   * deadlock the deck forever, with the retry below never reached.
+   * Readiness is the SDK's own `status`, not a probe. `get_state` cannot serve
+   * as one: its answer is the `state_update` broadcast, which reaches every
+   * client rather than the caller, so `sendCommand` has no caller-scoped reply
+   * to resolve and hands back `undefined` no matter how ready the session is.
+   *
+   * The same broadcast is where the session's real limits come from, and it is
+   * emitted on connect, so by the time status flips to ready it has normally
+   * already landed. If it has not, one `get_state` asks for it again and this
+   * effect re-runs when it arrives.
    */
   useEffect(() => {
-    let cancelled = false;
-    let timer: ReturnType<typeof setTimeout>;
-    let attempts = 0;
+    if (status !== "ready" || configured || configuring.current) return;
 
-    const attempt = async () => {
-      if (cancelled) return;
-      attempts += 1;
+    const state = sessionState.current;
+    if (!state) {
+      void sendCommand("get_state").catch(() => {});
+      return;
+    }
+
+    configuring.current = true;
+    let cancelled = false;
+
+    (async () => {
       try {
-        const state = await withTimeout(getState(), PROBE_TIMEOUT_MS, "get_state");
-        if (!state) throw new Error("get_state returned no state");
-        if (cancelled) return;
-        console.debug(`[deck] ready after ${attempts} probe(s)`, {
+        console.debug("[deck] configuring", {
           aspect: state.aspect,
           clipSeconds: `${state.clip_seconds_min}-${state.clip_seconds_max}`,
           generation: state.generation_capacity,
@@ -169,28 +167,21 @@ function DeckInner({
         }
 
         await setAutoplay({ enabled: true });
-        if (!cancelled) setConfigured(true);
+        if (!cancelled) {
+          console.debug("[deck] configured; clip length", clipSeconds.current);
+          setConfigured(true);
+        }
       } catch (err) {
-        const reason = err instanceof Error ? err.message : String(err);
-        // Refusals before the GPU is assigned are expected; log sparsely so the
-        // pattern is visible without burying the console.
-        if (attempts === 1 || attempts % 10 === 0) {
-          console.debug(`[deck] not ready yet (probe ${attempts}): ${reason}`);
-        }
-        if (attempts === 40) {
-          onError("The session has not come up after a minute. Still trying.");
-        }
-        timer = setTimeout(attempt, 1500);
+        configuring.current = false;
+        onError(err instanceof Error ? err.message : "Failed to configure the session.");
       }
-    };
+    })();
 
-    attempt();
     return () => {
       cancelled = true;
-      clearTimeout(timer);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [status, stateArrived, configured]);
 
   const refill = useCallback(async () => {
     const params = new URLSearchParams({ categories: program.categories.join(",") });
@@ -242,6 +233,8 @@ function DeckInner({
   }, [configured, enqueue, onError, onQueuePreview, program, refill]);
 
   useFastH3StateUpdate((state) => {
+    sessionState.current = state;
+    if (!stateArrived) setStateArrived(true);
     capacity.current.free = state.generation_capacity - state.generation_queued;
     onStats({
       building: state.generation_queued,
