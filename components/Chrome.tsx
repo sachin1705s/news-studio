@@ -144,12 +144,14 @@ export function StatusRail({
   errors,
   transmitMode,
   watching,
+  credits,
 }: {
   airtime: number;
   rotating: boolean;
   errors: string[];
   transmitMode?: boolean;
   watching: number | null;
+  credits: { balance: number; perSecond: number | null } | null;
 }) {
   const mins = Math.floor(airtime / 60);
   const secs = Math.floor(airtime % 60);
@@ -167,7 +169,24 @@ export function StatusRail({
           <dt>Watching</dt>
           <dd>{watching === null ? "—" : watching}</dd>
         </div>
+        <div>
+          <dt>Credits</dt>
+          <dd>{credits ? credits.balance.toLocaleString() : "—"}</dd>
+        </div>
+        <div>
+          <dt>Burn</dt>
+          <dd>
+            {credits?.perSecond == null
+              ? "—"
+              : `${credits.perSecond.toFixed(0)}/s · ${(credits.perSecond / 70).toFixed(1)}×`}
+          </dd>
+        </div>
       </dl>
+      {credits?.perSecond != null && credits.perSecond > 105 && (
+        <p className="transmit">
+          Burning {(credits.perSecond / 70).toFixed(1)} sessions — more than this channel started
+        </p>
+      )}
       {transmitMode && (
         <p className="transmit">Transmission mode · will not pause when unwatched</p>
       )}

@@ -32,6 +32,16 @@ import { ReactorMark } from "./ReactorMark";
  */
 const ROTATION_ENABLED = false;
 
+/**
+ * How long the channel keeps broadcasting to an empty room.
+ *
+ * The GPU bills from assignment to disconnect regardless of whether anyone is
+ * watching, so an audience of nobody is pure loss. The grace period only exists
+ * so a viewer refreshing the page, or the count momentarily missing a write,
+ * does not take the channel off air underneath them.
+ */
+const NO_AUDIENCE_GRACE_MS = 90_000;
+
 /** A standby deck needs roughly one clip build to have picture. 90s is generous. */
 const PREROLL_LEAD_MS = 90_000;
 
@@ -91,6 +101,11 @@ export function Broadcast() {
   const [muted, setMuted] = useState(true);
   /** Bumped to retry the join while another browser is still starting up. */
   const [joinAttempt, setJoinAttempt] = useState(0);
+  /** When the audience last stood at zero, for the empty-room shutdown. */
+  const emptySince = useRef<number | null>(null);
+  /** Live balance and the rate it is falling, which is how many sessions are up. */
+  const [credits, setCredits] = useState<{ balance: number; perSecond: number | null } | null>(null);
+  const lastBalance = useRef<{ balance: number; at: number } | null>(null);
   const originId = useRef<string>("");
   const [comments, setComments] = useState<Comment[]>([]);
 
@@ -289,6 +304,101 @@ export function Broadcast() {
       clearTimeout(retry);
     };
   }, [onAir, role, takeOverDeadChannel, joinAttempt]);
+
+  /**
+   * Drop every session and stop the clock. Unmounting the decks is what
+   * actually ends the billing: the SDK disconnects on teardown.
+   */
+  const goOffAir = useCallback((idle: boolean) => {
+    setOnAir(false);
+    setPausedForIdle(idle);
+    setMounted([false, false]);
+    setRotating(false);
+    setMeta(null);
+    setStats(null);
+    setPreview([]);
+    airStart.current = null;
+    prerollStart.current = null;
+    setEpoch((prev) => [prev[0] + 1, prev[1] + 1]);
+  }, []);
+
+  /**
+   * Join the channel.
+   *
+   * If someone is already broadcasting, this browser attaches to their session
+   * and watches it. Only when nobody is does it start one — so the first person
+   * through the door pays for the GPU and everybody after them is free.
+   */
+  /**
+   * Stop broadcasting to an empty room.
+   *
+   * This is the only thing standing between an unattended tab and a bill: a
+   * session left running overnight with nobody watching costs the same as one
+   * with an audience. Transmission mode does not exempt it — that flag is about
+   * a backgrounded tab, not about paying for nobody.
+   */
+  useEffect(() => {
+    if (role !== "origin" || !onAir || watching === null) return;
+
+    if (watching > 0) {
+      emptySince.current = null;
+      return;
+    }
+
+    if (emptySince.current === null) emptySince.current = Date.now();
+    if (Date.now() - emptySince.current < NO_AUDIENCE_GRACE_MS) return;
+
+    emptySince.current = null;
+    void fetch("/api/channel", {
+      method: "DELETE",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ originId: originId.current }),
+    }).catch(() => {});
+    setRole("idle");
+    goOffAir(true);
+  }, [role, onAir, watching, goOffAir]);
+
+  /**
+   * Watch the balance, and infer from it what is actually running.
+   *
+   * Every other number here is what this browser believes it started. The
+   * balance is the only one that reflects the truth: a session started by an
+   * old tab on a stale build is invisible to the registry but not to the
+   * meter. Divide the rate of fall by one session's rate and you have the
+   * count — which is why the burn is shown as a multiple.
+   */
+  useEffect(() => {
+    let alive = true;
+
+    const read = async () => {
+      try {
+        const res = await fetch("/api/credits", { cache: "no-store" });
+        if (!res.ok) return;
+        const body = (await res.json()) as { balance?: number; at?: number };
+        if (!alive || typeof body.balance !== "number") return;
+
+        const now = body.at ?? Date.now();
+        const prev = lastBalance.current;
+        // Only over a long enough gap to be meaningful, and only while falling.
+        const perSecond =
+          prev && now - prev.at > 30_000 && prev.balance > body.balance
+            ? ((prev.balance - body.balance) / (now - prev.at)) * 1000
+            : null;
+
+        setCredits((was) => ({ balance: body.balance!, perSecond: perSecond ?? was?.perSecond ?? null }));
+        if (!prev || now - prev.at > 30_000) lastBalance.current = { balance: body.balance, at: now };
+      } catch {
+        // A missing balance is not worth interrupting a broadcast over.
+      }
+    };
+
+    void read();
+    const id = setInterval(() => void read(), 45_000);
+    return () => {
+      alive = false;
+      clearInterval(id);
+    };
+  }, []);
 
   /**
    * Announce this viewer, and read back how many others are here.
@@ -538,30 +648,6 @@ export function Broadcast() {
     return () => clearInterval(id);
   }, [onAir, cutTo, beginPreroll]);
 
-  /**
-   * Drop every session and stop the clock. Unmounting the decks is what
-   * actually ends the billing: the SDK disconnects on teardown.
-   */
-  const goOffAir = useCallback((idle: boolean) => {
-    setOnAir(false);
-    setPausedForIdle(idle);
-    setMounted([false, false]);
-    setRotating(false);
-    setMeta(null);
-    setStats(null);
-    setPreview([]);
-    airStart.current = null;
-    prerollStart.current = null;
-    setEpoch((prev) => [prev[0] + 1, prev[1] + 1]);
-  }, []);
-
-  /**
-   * Join the channel.
-   *
-   * If someone is already broadcasting, this browser attaches to their session
-   * and watches it. Only when nobody is does it start one — so the first person
-   * through the door pays for the GPU and everybody after them is free.
-   */
   const takeAir = useCallback(async () => {
     setPausedForIdle(false);
 
@@ -736,7 +822,7 @@ export function Broadcast() {
                 </h1>
                 <p className="gate-copy">
                   {pausedForIdle
-                    ? "This tab was in the background, so the channel came off air and released the GPU — it bills by the second whether or not anyone is watching."
+                    ? "Nobody was watching, so the channel came off air and released the GPU — it bills by the second whether or not anyone is here."
                     : "A continuous bulletin built segment by segment from live wire feeds. The channel opens on the startup desk. Sound is part of the generation, so it needs your go-ahead to start."}
                 </p>
                 <button type="button" className="btn btn-primary" onClick={takeAir}>
@@ -807,6 +893,7 @@ export function Broadcast() {
           errors={errors}
           transmitMode={transmitMode}
           watching={watching}
+          credits={credits}
         />
 
         <CommunityPanel comments={comments} onPost={postComment} />
