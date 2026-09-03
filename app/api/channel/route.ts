@@ -30,18 +30,35 @@ const KEY = "channel";
 const STALE_MS = 5 * 60_000;
 
 interface Registration {
-  sessionId: string;
+  /**
+   * Null while a browser has reserved the channel but has not yet brought a
+   * session up. Reserving first is what stops two arrivals in the same moment
+   * each paying for a GPU before one of them stands down.
+   */
+  sessionId: string | null;
   /** Identifies the browser driving the channel, for handover. */
   originId: string;
   startedAt: number;
   heartbeatAt: number;
 }
 
+/** A reservation is only honoured briefly: a browser that never brings a
+ *  session up must not hold the channel shut. */
+const RESERVE_MS = 60_000;
+
 export async function GET() {
   const live = await readJson<Registration | null>(KEY, null);
-  const fresh = live && Date.now() - live.heartbeatAt <= STALE_MS ? live : null;
+  const now = Date.now();
+  const fresh = live && now - live.heartbeatAt <= STALE_MS ? live : null;
+
+  // Only a registration with a session is something to join. A live
+  // reservation is reported separately so an arrival waits rather than
+  // starting a second broadcast of its own.
   return NextResponse.json(
-    { channel: fresh },
+    {
+      channel: fresh?.sessionId ? fresh : null,
+      reserved: Boolean(fresh && !fresh.sessionId && now - fresh.startedAt <= RESERVE_MS),
+    },
     { headers: { "Cache-Control": "no-store" } },
   );
 }
@@ -62,21 +79,25 @@ export async function POST(request: Request) {
   }
 
   const { sessionId, originId } = (body ?? {}) as { sessionId?: unknown; originId?: unknown };
-  if (typeof sessionId !== "string" || !sessionId || typeof originId !== "string" || !originId) {
+  if (typeof originId !== "string" || !originId) {
     return NextResponse.json({ error: "Incomplete claim." }, { status: 400 });
   }
+  // Omitting the session id reserves the channel; supplying it fills the
+  // reservation in once the session is up.
+  const session = typeof sessionId === "string" && sessionId ? sessionId : null;
 
   const now = Date.now();
   const current = await readJson<Registration | null>(KEY, null);
   const fresh = current && now - current.heartbeatAt <= STALE_MS ? current : null;
 
   if (fresh && fresh.originId !== originId) {
-    // Someone else is already broadcasting. Adopt theirs.
+    // Someone else holds the channel — broadcasting, or reserved and about to.
+    // Either way this browser must not start a second one.
     return NextResponse.json({ channel: fresh, claimed: false });
   }
 
   const next: Registration = {
-    sessionId,
+    sessionId: session ?? fresh?.sessionId ?? null,
     originId,
     startedAt: fresh?.startedAt ?? now,
     heartbeatAt: now,

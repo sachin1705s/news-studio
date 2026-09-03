@@ -77,6 +77,8 @@ export function Broadcast() {
   const [adoptSessionId, setAdoptSessionId] = useState<string | null>(null);
   /** Viewers join muted, because browsers refuse unmuted autoplay without a gesture. */
   const [muted, setMuted] = useState(true);
+  /** Bumped to retry the join while another browser is still starting up. */
+  const [joinAttempt, setJoinAttempt] = useState(0);
   const originId = useRef<string>("");
   const [comments, setComments] = useState<Comment[]>([]);
 
@@ -203,8 +205,22 @@ export function Broadcast() {
   const takeOverDeadChannel = useCallback(async () => {
     try {
       await fetch("/api/channel", { method: "DELETE" });
+      // Reserve the channel BEFORE bringing a session up. Creating first and
+      // claiming after meant two arrivals in the same moment each paid for a
+      // GPU before one stood down — real money, on a metered account.
+      const res = await fetch("/api/channel", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ originId: originId.current }),
+      });
+      const body = (await res.json()) as { claimed?: boolean };
+      if (body.claimed === false) {
+        // Someone beat us to it. Wait for their session and adopt it.
+        setRole("idle");
+        return;
+      }
     } catch {
-      // Clearing is a courtesy to other arrivals; failing it is not fatal.
+      // Unreachable registry: better a broadcast than a dead channel.
     }
     setAdoptSessionId(null);
     setRole("origin");
@@ -227,14 +243,20 @@ export function Broadcast() {
   useEffect(() => {
     if (onAir || role !== "idle") return;
     let cancelled = false;
+    const retry = setTimeout(() => setJoinAttempt((n) => n + 1), 6000);
 
     (async () => {
       try {
         const res = await fetch("/api/channel", { cache: "no-store" });
         if (!res.ok) return;
-        const body = (await res.json()) as { channel?: { sessionId: string } | null };
+        const body = (await res.json()) as {
+          channel?: { sessionId: string } | null;
+          reserved?: boolean;
+        };
         const sid = body.channel?.sessionId;
         if (cancelled) return;
+        // Somebody is mid-start. Leave them to it and pick them up next tick.
+        if (!sid && body.reserved) return;
         if (!sid) {
           // Nobody is broadcasting. Rather than show a door, be the channel.
           void takeOverDeadChannel();
@@ -252,8 +274,9 @@ export function Broadcast() {
 
     return () => {
       cancelled = true;
+      clearTimeout(retry);
     };
-  }, [onAir, role, takeOverDeadChannel]);
+  }, [onAir, role, takeOverDeadChannel, joinAttempt]);
 
   /**
    * Announce this viewer, and read back how many others are here.
@@ -746,6 +769,25 @@ export function Broadcast() {
           <div className="rail-mark">R24 CONTROL</div>
           <div className="rail-sub">{program.name}</div>
         </header>
+
+        {role === "origin" && onAir && (
+          <button
+            type="button"
+            className="btn btn-stop"
+            onClick={() => {
+              // Unmounting the decks is what ends the session and the billing.
+              void fetch("/api/channel", {
+                method: "DELETE",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ originId: originId.current }),
+              }).catch(() => {});
+              setRole("idle");
+              goOffAir(false);
+            }}
+          >
+            Stop broadcast · releases the GPU
+          </button>
+        )}
 
         <StatusRail
           airtime={airtime}

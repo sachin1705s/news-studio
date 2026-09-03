@@ -988,3 +988,16 @@ body {
 .unmute:hover span {
   background: rgba(6, 8, 12, 0.94);
 }
+
+/* The GPU bills by the second, so stopping it is a first-class control. */
+.btn-stop {
+  margin: 14px 18px 0;
+  width: calc(100% - 36px);
+  border-color: rgba(226, 55, 43, 0.5);
+  color: #ff8b7d;
+}
+
+.btn-stop:hover {
+  background: rgba(226, 55, 43, 0.12);
+  border-color: #e2372b;
+}
