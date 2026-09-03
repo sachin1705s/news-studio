@@ -21,7 +21,15 @@ export function Clock() {
   );
 }
 
-export function ChannelBug({ program, onAir }: { program: Program; onAir: boolean }) {
+export function ChannelBug({
+  program,
+  onAir,
+  watching,
+}: {
+  program: Program;
+  onAir: boolean;
+  watching: number | null;
+}) {
   return (
     <div className="bug">
       <div className="bug-mark">R24</div>
@@ -32,6 +40,11 @@ export function ChannelBug({ program, onAir }: { program: Program; onAir: boolea
       <div className="bug-prog" style={{ color: program.accent }}>
         {program.name}
       </div>
+      {watching !== null && watching > 0 && (
+        <div className="bug-watching" title="People with the channel open right now">
+          {watching} watching
+        </div>
+      )}
     </div>
   );
 }
@@ -130,11 +143,13 @@ export function StatusRail({
   rotating,
   errors,
   transmitMode,
+  watching,
 }: {
   airtime: number;
   rotating: boolean;
   errors: string[];
   transmitMode?: boolean;
+  watching: number | null;
 }) {
   const mins = Math.floor(airtime / 60);
   const secs = Math.floor(airtime % 60);
@@ -147,6 +162,10 @@ export function StatusRail({
           <dd>
             {String(mins).padStart(2, "0")}:{String(secs).padStart(2, "0")}
           </dd>
+        </div>
+        <div>
+          <dt>Watching</dt>
+          <dd>{watching === null ? "—" : watching}</dd>
         </div>
       </dl>
       {transmitMode && (

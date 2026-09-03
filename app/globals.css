@@ -944,3 +944,14 @@ body {
   letter-spacing: 0.06em;
   color: var(--ink-faint);
 }
+
+/* The on-screen audience count, beside the channel bug. */
+.bug-watching {
+  padding: 3px 8px;
+  background: rgba(6, 8, 12, 0.72);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  font-family: var(--mono);
+  font-size: 10px;
+  letter-spacing: 0.08em;
+  color: var(--ink-dim);
+}

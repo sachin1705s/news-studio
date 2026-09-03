@@ -63,6 +63,8 @@ export function Broadcast() {
   const [pausedForIdle, setPausedForIdle] = useState(false);
   /** An unattended run: keep transmitting even with the tab in the background. */
   const [transmitMode, setTransmitMode] = useState(false);
+  /** How many people have the channel open right now. */
+  const [watching, setWatching] = useState<number | null>(null);
   const [comments, setComments] = useState<Comment[]>([]);
 
   /** The channel opens on the startup desk for one block, then joins the wheel. */
@@ -103,6 +105,54 @@ export function Broadcast() {
       clearInterval(id);
       window.removeEventListener("pagehide", onLeave);
       saveAired(usedStoryIds.current);
+    };
+  }, []);
+
+  /**
+   * Announce this viewer, and read back how many others are here.
+   *
+   * A heartbeat rather than connect/disconnect: the web has no reliable
+   * disconnect, so viewers are counted while they keep announcing themselves
+   * and forgotten when they stop. Only a visible tab beats, because a
+   * backgrounded tab is not somebody watching.
+   */
+  useEffect(() => {
+    const KEY = "r24.viewer";
+    let id = "";
+    try {
+      id = window.localStorage.getItem(KEY) ?? "";
+      if (!id) {
+        id = crypto.randomUUID();
+        window.localStorage.setItem(KEY, id);
+      }
+    } catch {
+      // Private window or blocked storage: still count, just not across reloads.
+      id = crypto.randomUUID();
+    }
+
+    let alive = true;
+    const beat = async () => {
+      if (document.hidden) return;
+      try {
+        const res = await fetch("/api/presence", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ id }),
+        });
+        if (!res.ok) return;
+        const body = (await res.json()) as { watching?: number };
+        if (alive && typeof body.watching === "number") setWatching(body.watching);
+      } catch {
+        // The counter is decoration; its failure is not worth surfacing.
+      }
+    };
+
+    const first = setTimeout(() => void beat(), 0);
+    const id2 = setInterval(() => void beat(), 20_000);
+    return () => {
+      alive = false;
+      clearTimeout(first);
+      clearInterval(id2);
     };
   }, []);
 
@@ -454,7 +504,11 @@ export function Broadcast() {
           {onAir && (
             <>
               <div className="overlay overlay-top">
-                <ChannelBug program={program} onAir={stats !== null && meta !== null} />
+                <ChannelBug
+                  program={program}
+                  onAir={stats !== null && meta !== null}
+                  watching={watching}
+                />
                 <Clock />
               </div>
               <div className="overlay overlay-bottom">
@@ -482,6 +536,7 @@ export function Broadcast() {
           rotating={rotating}
           errors={errors}
           transmitMode={transmitMode}
+          watching={watching}
         />
 
         <CommunityPanel comments={comments} onPost={postComment} />
