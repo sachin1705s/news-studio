@@ -110,6 +110,8 @@ export function Broadcast() {
   const [muted, setMuted] = useState(true);
   /** Bumped to retry the join while another browser is still starting up. */
   const [joinAttempt, setJoinAttempt] = useState(0);
+  /** Media is flowing. Distinct from having a lower third to show. */
+  const [hasPicture, setHasPicture] = useState(false);
   /** When the audience last stood at zero, for the empty-room shutdown. */
   const emptySince = useRef<number | null>(null);
   /** Live balance and the rate it is falling, which is how many sessions are up. */
@@ -330,6 +332,7 @@ export function Broadcast() {
    */
   const goOffAir = useCallback((idle: boolean) => {
     setOnAir(false);
+    setHasPicture(false);
     setPausedForIdle(idle);
     setMounted([false, false]);
     setRotating(false);
@@ -623,6 +626,7 @@ export function Broadcast() {
 
   const handlePictureLive = useCallback(
     (slot: Slot) => {
+      setHasPicture(true);
       if (slot === liveRef.current) {
         // The on-air deck just produced its first frames.
         if (airStart.current === null) airStart.current = Date.now();
@@ -779,6 +783,7 @@ export function Broadcast() {
                 muted={muted}
                 onSegment={setMeta}
                 onPictureLive={() => {
+                  setHasPicture(true);
                   if (airStart.current === null) airStart.current = Date.now();
                 }}
                 onSessionLost={() => {
@@ -863,9 +868,11 @@ export function Broadcast() {
                 <LowerThird meta={meta} program={program} />
                 <Ticker segments={preview} />
               </div>
-              {!meta && (
+              {!hasPicture && (
                 <div className="slate">
-                  <span className="slate-text">Building the first segment…</span>
+                  <span className="slate-text">
+                    {role === "viewer" ? "Joining the channel…" : "Building the first segment…"}
+                  </span>
                 </div>
               )}
               {muted && role === "viewer" && (

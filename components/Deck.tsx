@@ -220,10 +220,26 @@ function ViewerInner({
   onSessionLost: () => void;
   onError: (message: string) => void;
 }) {
-  const { status } = useFastH3();
+  const { status, tracks } = useFastH3();
   const sawPicture = useRef(false);
   const wasReady = useRef(false);
   const reported = useRef(false);
+
+  /**
+   * Media is flowing, which is not the same as a clip having started.
+   *
+   * A viewer joins in the middle of whatever is on air, so the next
+   * `clip_started` can be a full clip away — and the channel used to hold an
+   * opaque slate over the picture until it arrived. The video is live the
+   * moment the track is: report it then, and let the lower third catch up.
+   */
+  useEffect(() => {
+    if (sawPicture.current) return;
+    if (status === "ready" && Object.keys(tracks ?? {}).length > 0) {
+      sawPicture.current = true;
+      onPictureLive();
+    }
+  }, [status, tracks, onPictureLive]);
 
   useEffect(() => {
     console.debug(`[viewer] status: ${status}`);
