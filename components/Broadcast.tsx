@@ -94,6 +94,8 @@ export function Broadcast() {
   const [transmitMode, setTransmitMode] = useState(false);
   /** ?ops=1 — shows the operator's controls. Off for everyone else. */
   const [opsMode, setOpsMode] = useState(false);
+  /** The value of ?ops=, which doubles as the key the balance read needs. */
+  const [opsKey, setOpsKey] = useState("");
   /** How many people have the channel open right now. */
   const [watching, setWatching] = useState<number | null>(null);
 
@@ -147,7 +149,9 @@ export function Broadcast() {
     // The operator's controls are not the audience's business: the account
     // balance, what it is burning and the button that takes the channel off
     // air have no place on a page anyone can open.
-    setOpsMode(params.get("ops") === "1");
+    const ops = params.get("ops");
+    setOpsMode(Boolean(ops));
+    setOpsKey(ops ?? "");
   }, []);
 
   /**
@@ -208,7 +212,24 @@ export function Broadcast() {
         channel?: { sessionId: string } | null;
       };
       if (body.claimed === false && body.channel?.sessionId) {
-        pushError("Another browser is already broadcasting. Watching theirs.");
+        // Standing down is only right before this browser has a session of its
+        // own. Once it is actually broadcasting it IS the channel, whatever the
+        // registry currently says — a momentary disagreement used to evict a
+        // working origin, unmount its deck and take the picture off the screen.
+        // Anyone else who tries is refused by the gate, so the registration is
+        // simply corrected instead.
+        if (liveSessionId.current) {
+          void fetch("/api/channel", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              sessionId: liveSessionId.current,
+              originId: originId.current,
+              force: true,
+            }),
+          }).catch(() => {});
+          return;
+        }
         setAdoptSessionId(body.channel.sessionId);
         setRole("viewer");
       }
@@ -418,7 +439,9 @@ export function Broadcast() {
 
     const read = async () => {
       try {
-        const res = await fetch("/api/credits", { cache: "no-store" });
+        const res = await fetch(`/api/credits?key=${encodeURIComponent(opsKey)}`, {
+          cache: "no-store",
+        });
         if (!res.ok) return;
         const body = (await res.json()) as { balance?: number; at?: number };
         if (!alive || typeof body.balance !== "number") return;
@@ -444,7 +467,7 @@ export function Broadcast() {
       alive = false;
       clearInterval(id);
     };
-  }, [opsMode]);
+  }, [opsMode, opsKey]);
 
   /**
    * Announce this viewer, and read back how many others are here.

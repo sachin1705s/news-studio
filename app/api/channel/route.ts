@@ -123,7 +123,11 @@ export async function POST(request: Request) {
     return NextResponse.json({ error: "Bad request." }, { status: 400 });
   }
 
-  const { sessionId, originId } = (body ?? {}) as { sessionId?: unknown; originId?: unknown };
+  const { sessionId, originId, force } = (body ?? {}) as {
+    sessionId?: unknown;
+    originId?: unknown;
+    force?: unknown;
+  };
   if (typeof originId !== "string" || !originId) {
     return NextResponse.json({ error: "Incomplete claim." }, { status: 400 });
   }
@@ -134,6 +138,30 @@ export async function POST(request: Request) {
   const now = Date.now();
   const current = await readJson<Registration | null>(KEY, null);
   const fresh = current && now - current.heartbeatAt <= STALE_MS ? current : null;
+
+  // A caller holding a session that Reactor still has open is the broadcast,
+  // whatever the registration says. A reservation must not be able to displace
+  // a channel that is actually on air.
+  if (fresh && fresh.originId !== originId && session && force) {
+    const apiKey = process.env.REACTOR_API_KEY;
+    if (apiKey) {
+      try {
+        const open = await openSessions(apiKey);
+        if (open.some((o) => o.sessionId === session)) {
+          const corrected: Registration = {
+            sessionId: session,
+            originId,
+            startedAt: now,
+            heartbeatAt: now,
+          };
+          await writeJson(KEY, corrected);
+          return NextResponse.json({ channel: corrected, claimed: true });
+        }
+      } catch {
+        // Fall through to the ordinary answer.
+      }
+    }
+  }
 
   if (fresh && fresh.originId !== originId) {
     // Someone else holds the channel — broadcasting, or reserved and about to.
