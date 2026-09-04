@@ -50,6 +50,23 @@ export async function POST(request: Request) {
     // No body is the origin case.
   }
 
+  // The off switch, checked before anything else. No origin token means no
+  // browser can start a broadcast, which is what "off" has to mean when every
+  // open tab is trying to start one.
+  if (!sessionId) {
+    // Environment first, and deliberately so. The store is eventually
+    // consistent and a write to it can be lost — acceptable for a comment,
+    // useless for the control that stops the account being billed. CHANNEL_OFF
+    // is read from the deployment itself and cannot fail to apply.
+    if (process.env.CHANNEL_OFF === "1") {
+      return NextResponse.json({ error: "The channel is switched off." }, { status: 503 });
+    }
+    const power = await readJson<{ off?: boolean } | null>("power", null);
+    if (power?.off) {
+      return NextResponse.json({ error: "The channel is switched off." }, { status: 503 });
+    }
+  }
+
   // The origin gate. A browser cannot start a broadcast without a token, and
   // this is the only place tokens come from — so refusing here is the one
   // control that actually holds. Everything client-side is advisory: a stale
