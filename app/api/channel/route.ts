@@ -52,6 +52,27 @@ export async function GET() {
   const now = Date.now();
   let fresh = live && now - live.heartbeatAt <= STALE_MS ? live : null;
 
+  // A registration can also name a session that has since been closed, and
+  // handing that to an arrival is worse than handing them nothing: they attach,
+  // see no picture, and wait out the dead-session timeout before anyone starts
+  // a real broadcast. So the registry is checked against Reactor rather than
+  // trusted, and a registration whose session is gone is treated as absent.
+  if (fresh?.sessionId) {
+    const apiKey = process.env.REACTOR_API_KEY;
+    if (apiKey) {
+      try {
+        const open = await openSessions(apiKey);
+        if (!open.some((o) => o.sessionId === fresh?.sessionId)) {
+          fresh = null;
+          await writeJson(KEY, null);
+        }
+      } catch {
+        // Reactor unreachable: trust the registration rather than blank the
+        // channel on the strength of a failed lookup.
+      }
+    }
+  }
+
   // The registry can be empty because nothing is running, or because the store
   // that holds it is unavailable. Those look identical from here and mean
   // opposite things, so when it is empty Reactor is asked directly — otherwise
