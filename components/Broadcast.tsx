@@ -793,7 +793,22 @@ export function Broadcast() {
                   setAdoptSessionId(null);
                   void takeAir();
                 }}
-                onDeadSession={() => void takeOverDeadChannel()}
+                onDeadSession={() => {
+                  // Attached, waited, saw nothing. Have the stuck session
+                  // closed before starting a new one — otherwise the gate
+                  // refuses, because from its side a session is still open.
+                  const dead = adoptSessionId;
+                  void (async () => {
+                    if (dead) {
+                      await fetch("/api/reclaim", {
+                        method: "POST",
+                        headers: { "Content-Type": "application/json" },
+                        body: JSON.stringify({ sessionId: dead }),
+                      }).catch(() => {});
+                    }
+                    await takeOverDeadChannel();
+                  })();
+                }}
                 onError={pushError}
               />
             </div>
