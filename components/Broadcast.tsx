@@ -599,31 +599,33 @@ export function Broadcast() {
 
   const takeComment = useCallback(async (coverage: string[]): Promise<ViewerTake | null> => {
     const unread = commentsRef.current.filter((c) => !c.readAt).sort((a, b) => a.at - b.at);
+    const candidate = unread[0];
+    if (!candidate) return null;
 
-    for (const candidate of unread.slice(0, 3)) {
+    try {
+      const res = await fetch("/api/reply", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ author: candidate.author, text: candidate.text, coverage }),
+      });
+      if (!res.ok) return null;
+      const body = (await res.json()) as { answer?: boolean; reply?: string };
+      if (!body.answer || !body.reply) return null;
+
+      // Marked read only now, with a line in hand. Marking on the way in meant
+      // a comment could be consumed, refused, badged "read on air" and lost —
+      // the badge claimed it had been broadcast when nothing was ever said.
       markRead(candidate.id);
-      try {
-        const res = await fetch("/api/reply", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ author: candidate.author, text: candidate.text, coverage }),
-        });
-        if (!res.ok) continue;
-        const body = (await res.json()) as { answer?: boolean; reply?: string };
-        if (body.answer && body.reply) {
-          return {
-            id: candidate.id,
-            author: candidate.author,
-            text: candidate.text,
-            reply: body.reply,
-          };
-        }
-      } catch {
-        // The anchor stays silent rather than reciting an unanswered comment.
-        return null;
-      }
+      return {
+        id: candidate.id,
+        author: candidate.author,
+        text: candidate.text,
+        reply: body.reply,
+      };
+    } catch {
+      // Left unread, so the next block tries it again rather than losing it.
+      return null;
     }
-    return null;
   }, [markRead]);
 
   const cutTo = useCallback((slot: Slot) => {
