@@ -8,7 +8,9 @@ import {
   FastH3Provider,
   useFastH3,
   useFastH3ClipFailed,
+  useFastH3ClipFinished,
   useFastH3ClipStarted,
+  useFastH3QueueUpdate,
   useFastH3CommandError,
   useFastH3StateUpdate,
 } from "@reactor-models/fast-h3";
@@ -129,6 +131,17 @@ async function fetchToken(adopt: string | null): Promise<string> {
   return request;
 }
 
+/**
+ * A token, resolved once, held as a string for the session's whole life.
+ *
+ * The SDK accepts either a string or a resolver, and the resolver is called
+ * before every authenticated request — so handing it a function that can return
+ * a *different* token mid-session is a trap. It happened: a refreshed token had
+ * not created the session, so it was not authorized for it, termination came
+ * back 403, the session leaked and the connection churned. The cookbook's own
+ * rule is explicit — "the resolver must return a stable token for a session's
+ * whole life" — and a string cannot be anything else.
+ */
 const originToken = () => fetchToken(null);
 
 /**
@@ -414,6 +427,12 @@ function DeckInner({
    *  screen black — it is built at the shortest length the model offers. */
   const openingClip = useRef(true);
   /**
+   * Incremented whenever this deck is torn down or restarted. Async work started
+   * before that point checks it before acting, so a refill from a dead session
+   * cannot enqueue into a live one.
+   */
+  const epoch = useRef(0);
+  /**
    * A number that is different every time the channel starts.
    *
    * Without it the shuffle is seeded on the cycle counter, which begins at zero
@@ -506,6 +525,7 @@ function DeckInner({
 
     return () => {
       cancelled = true;
+      epoch.current += 1;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [status, stateArrived, configured]);
@@ -778,8 +798,12 @@ function DeckInner({
   const topUp = useCallback(async () => {
     if (!configured || feeding.current) return;
     feeding.current = true;
+    const startedAt = epoch.current;
     try {
       while (capacity.current.free > 0 && ahead.current < MAX_LOOKAHEAD) {
+        // The session may have been torn down while the last await was in
+        // flight; anything queued now would land in a stream nobody is watching.
+        if (epoch.current !== startedAt) return;
         if (pending.current.length === 0) await refill();
         const next = pending.current[0];
         if (!next) break;
@@ -894,6 +918,22 @@ function DeckInner({
   useFastH3ClipFailed((message) => {
     const meta = parseMeta(message.clip.metadata);
     onError(`Segment failed to build${meta ? `: ${meta.slug}` : ""}. Skipping.`);
+    // A hole just opened in the running order; fill it now rather than waiting
+    // for the next tick.
+    void topUp();
+  });
+
+  /**
+   * A clip finished, so there is room. Refilling on the events that actually
+   * change the queue keeps it fuller than polling does, and it costs nothing
+   * when nothing is happening.
+   */
+  useFastH3ClipFinished(() => {
+    void topUp();
+  });
+
+  useFastH3QueueUpdate(() => {
+    void topUp();
   });
 
   useFastH3CommandError((message) => {

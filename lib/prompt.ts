@@ -4,6 +4,22 @@ import type { Segment } from "./types";
 export const PROMPT_LIMIT = 800;
 
 /**
+ * How the anchor's voice is named, and why the language is part of it.
+ *
+ * FastH3 is FastVideo's checkpoint, whose native training format carries
+ * explicit language tags — English and Chinese among them. The prompt guide is
+ * blunt that a bracketed `[English]` tag is ceremonial at wire length and that
+ * the lever which works is naming the voice: so the language lives in the
+ * speaker descriptor, where the checkpoint was trained to read it, rather than
+ * as metadata it will ignore.
+ *
+ * Without it the model drifts into another language, and it drifts hardest
+ * exactly where a bulletin goes — a story set in Munich or Shenzhen pulls the
+ * delivery with it.
+ */
+const VOICE = "English, neutral international broadcast accent";
+
+/**
  * Words the anchor can actually land inside a clip of this length. FastH3 reads
  * at a broadcast pace; overshooting the budget gets the line cut off mid-word at
  * the clip boundary, so the script is trimmed to fit rather than the clip stretched.
@@ -165,14 +181,14 @@ export function buildPrompt(
     ? [
         `The anchor in the frame begins speaking straight to camera, small natural head movements, blinking, one measured hand gesture on the desk.`,
         `Locked medium shot, no camera move.`,
-        `S1 (the anchor, ${program.tone}): "${script}"`,
+        `S1 (the anchor, ${VOICE}, ${program.tone}): "${script}"`,
         audio,
       ]
     : [
         `${cap(program.set)}.`,
         `A news anchor in a dark suit sits at the desk facing camera, hands resting on the desk, an earpiece visible.`,
         `Locked medium shot, no camera move.`,
-        `S1 (the anchor, ${program.tone}): "${script}"`,
+        `S1 (the anchor, ${VOICE}, ${program.tone}): "${script}"`,
         audio,
       ];
 
@@ -216,7 +232,7 @@ function buildBrollPrompt(
     `${cap(shotText)}.`,
     `${look}.`,
     `The shot develops across its full length: continuous movement, never a held frame.`,
-    `S1 (an unseen news anchor, voiceover over the footage, ${program.tone}): "${script}"`,
+    `S1 (an unseen news anchor, ${VOICE}, voiceover over the footage, ${program.tone}): "${script}"`,
     `Audio: the location's own atmosphere under the voice; no studio music.`,
   ];
 
@@ -256,7 +272,7 @@ function buildReporterPrompt(
     `On-location television news report, no lettering or signage in frame.`,
     `A news correspondent stands facing camera holding a microphone, ${scene} behind them.`,
     `Medium shot, slight handheld movement, available daylight, people passing in the background.`,
-    `S1 (the correspondent, clear field-report delivery, a shade more urgent than a studio read): "${script}"`,
+    `S1 (the correspondent, ${VOICE}, clear field-report delivery, a shade more urgent than a studio read): "${script}"`,
     `Audio: the location's own background noise around the voice; no studio music.`,
   ];
 
