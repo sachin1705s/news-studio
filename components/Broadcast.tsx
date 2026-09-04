@@ -92,6 +92,8 @@ export function Broadcast() {
   const [pausedForIdle, setPausedForIdle] = useState(false);
   /** An unattended run: keep transmitting even with the tab in the background. */
   const [transmitMode, setTransmitMode] = useState(false);
+  /** ?ops=1 — shows the operator's controls. Off for everyone else. */
+  const [opsMode, setOpsMode] = useState(false);
   /** How many people have the channel open right now. */
   const [watching, setWatching] = useState<number | null>(null);
 
@@ -138,7 +140,12 @@ export function Broadcast() {
   }, [live, rotating, comments]);
 
   useEffect(() => {
-    setTransmitMode(new URLSearchParams(window.location.search).get("transmit") === "1");
+    const params = new URLSearchParams(window.location.search);
+    setTransmitMode(params.get("transmit") === "1");
+    // The operator's controls are not the audience's business: the account
+    // balance, what it is burning and the button that takes the channel off
+    // air have no place on a page anyone can open.
+    setOpsMode(params.get("ops") === "1");
   }, []);
 
   /**
@@ -380,6 +387,7 @@ export function Broadcast() {
    * count — which is why the burn is shown as a multiple.
    */
   useEffect(() => {
+    if (!opsMode) return;
     let alive = true;
 
     const read = async () => {
@@ -410,7 +418,7 @@ export function Broadcast() {
       alive = false;
       clearInterval(id);
     };
-  }, []);
+  }, [opsMode]);
 
   /**
    * Announce this viewer, and read back how many others are here.
@@ -881,7 +889,7 @@ export function Broadcast() {
           <div className="rail-sub">{program.name}</div>
         </header>
 
-        {role === "origin" && onAir && (
+        {opsMode && role === "origin" && onAir && (
           <button
             type="button"
             className="btn btn-stop"
@@ -906,7 +914,7 @@ export function Broadcast() {
           errors={errors}
           transmitMode={transmitMode}
           watching={watching}
-          credits={credits}
+          credits={opsMode ? credits : null}
         />
 
         <CommunityPanel comments={comments} onPost={postComment} />

@@ -23,6 +23,15 @@ const HEAD_TAIL_SECONDS = 1.6;
  * means anything — and the b-roll is where the story's detail is spoken, so it
  * has more to carry than the anchor's one-line introduction.
  */
+/**
+ * The shortest clip the model will build.
+ *
+ * Used for the very first clip of a broadcast only. Build time tracks clip
+ * length, and nothing is on screen until that first clip exists — so the
+ * opener is the one place where getting *something* up beats saying more.
+ */
+export const FIRST_CLIP_SECONDS = 5.2;
+
 export const CLIP_TIERS = {
   /** Bumpers, links and viewer mail. */
   brief: 6.5,

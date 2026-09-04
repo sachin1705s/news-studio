@@ -14,7 +14,7 @@ import {
 } from "@reactor-models/fast-h3";
 import type { ProducedItem } from "@/lib/newsroom";
 import type { Program } from "@/lib/programs";
-import { buildPrompt, clipSecondsFor } from "@/lib/prompt";
+import { buildPrompt, clipSecondsFor, FIRST_CLIP_SECONDS } from "@/lib/prompt";
 import { buildRundown, headlinesFor } from "@/lib/rundown";
 import { markPinnedRun, nextCycle, shouldRunPinned } from "@/lib/history";
 import { PINNED_LEAD } from "@/lib/pinned";
@@ -394,6 +394,9 @@ function DeckInner({
   const coverage = useRef<string[]>([]);
   const cycle = useRef(0);
   const feeding = useRef(false);
+  /** Nothing has been queued yet, so the next clip is the one keeping the
+   *  screen black — it is built at the shortest length the model offers. */
+  const openingClip = useRef(true);
   /**
    * A number that is different every time the channel starts.
    *
@@ -707,7 +710,10 @@ function DeckInner({
           ? await frameFor(segment.story)
           : null;
 
-      const seconds = clipSecondsFor(segment, clipSeconds.current);
+      const seconds = openingClip.current
+        ? FIRST_CLIP_SECONDS
+        : clipSecondsFor(segment, clipSeconds.current);
+      openingClip.current = false;
 
       await enqueue({
         prompt: buildPrompt(segment, program, seconds, inStudio && !!still.current),

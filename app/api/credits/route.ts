@@ -17,9 +17,17 @@ export const dynamic = "force-dynamic";
 const ACCOUNT_PATH = "https://api.reactor.inc/accounts";
 const CREDITS_PER_DOLLAR = 10_000;
 
-export async function GET() {
+export async function GET(request: Request) {
   const apiKey = process.env.REACTOR_API_KEY;
   if (!apiKey) return NextResponse.json({ error: "No API key." }, { status: 500 });
+
+  // An account balance is not public information. Without a configured secret
+  // this answers only in development, rather than defaulting to open.
+  const secret = process.env.OPS_SECRET;
+  const offered = new URL(request.url).searchParams.get("key");
+  if (secret ? offered !== secret : process.env.NODE_ENV === "production") {
+    return NextResponse.json({ error: "Not available." }, { status: 404 });
+  }
 
   try {
     const me = await fetch("https://api.reactor.inc/me", {
