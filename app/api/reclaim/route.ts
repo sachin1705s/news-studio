@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { openSessions, terminateSession } from "@/lib/reactor-sessions";
+import { forgetSessionCache, openSessions, terminateSession } from "@/lib/reactor-sessions";
 import { writeJson } from "@/lib/store";
 
 export const runtime = "nodejs";
@@ -50,7 +50,10 @@ export async function POST(request: Request) {
     }
 
     const killed = await terminateSession(apiKey, sessionId);
-    if (killed) await writeJson("channel", null);
+    if (killed) {
+      forgetSessionCache();
+      await writeJson("channel", null);
+    }
     return NextResponse.json({ reclaimed: killed });
   } catch {
     return NextResponse.json({ error: "Could not reach Reactor." }, { status: 502 });

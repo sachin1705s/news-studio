@@ -267,6 +267,29 @@ export function Broadcast() {
         setRole("idle");
         return;
       }
+
+      // Ask for the credential before mounting anything. The gate refuses if a
+      // broadcast came up while this browser was reserving, and finding that
+      // out here means becoming a viewer of it — rather than mounting a deck
+      // whose connection then fails with nothing on screen and no way back.
+      const tok = await fetch("/api/reactor/token", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ originId: originId.current }),
+      });
+      if (tok.status === 409) {
+        const held = (await tok.json()) as { sessionId?: string };
+        if (held.sessionId) {
+          setAdoptSessionId(held.sessionId);
+          setRole("viewer");
+          setMuted(true);
+          setOnAir(true);
+          airStart.current = Date.now();
+          return;
+        }
+        setRole("idle");
+        return;
+      }
     } catch {
       // Unreachable registry: better a broadcast than a dead channel.
     }

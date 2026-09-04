@@ -852,6 +852,24 @@ function DeckInner({
     }
   }, [status, configured, onSessionLost]);
 
+  /**
+   * Never connected at all.
+   *
+   * A refused token leaves the provider disconnected with nothing on screen and
+   * nothing to retry, which looks identical to a channel that is simply slow.
+   * Reporting it lets the page go back and find whichever broadcast beat it.
+   */
+  useEffect(() => {
+    if (configured) return;
+    const id = setTimeout(() => {
+      if (!configured && !reportedLoss.current) {
+        reportedLoss.current = true;
+        onSessionLost();
+      }
+    }, 30_000);
+    return () => clearTimeout(id);
+  }, [configured, onSessionLost]);
+
   useFastH3ClipStarted((message) => {
     if (!sawPicture.current) {
       sawPicture.current = true;
