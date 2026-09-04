@@ -27,7 +27,7 @@ const KEY = "channel";
  * second GPU session. A background tab can have its timers throttled to once a
  * minute, so ninety seconds was not enough room.
  */
-const STALE_MS = 5 * 60_000;
+const STALE_MS = 8 * 60_000;
 
 interface Registration {
   /**

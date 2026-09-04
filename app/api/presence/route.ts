@@ -20,7 +20,7 @@ export const dynamic = "force-dynamic";
 const KEY = "presence";
 
 /** How long a viewer stays counted after their last heartbeat. */
-const WINDOW_MS = 60_000;
+const WINDOW_MS = 180_000;
 
 /** Beyond this many, the store is being abused rather than watched. */
 const MAX_TRACKED = 500;

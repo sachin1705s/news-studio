@@ -192,7 +192,7 @@ export function Broadcast() {
    * browser stands down and watches theirs instead of running a second stream.
    */
   const registerChannel = useCallback(async (sessionId: string, force = false) => {
-    if (!force && Date.now() - lastRegisterAt.current < 20_000) return;
+    if (!force && Date.now() - lastRegisterAt.current < 60_000) return;
     lastRegisterAt.current = Date.now();
     try {
       const res = await fetch("/api/channel", {
@@ -222,7 +222,7 @@ export function Broadcast() {
     const id = setInterval(() => {
       const sid = liveSessionId.current;
       if (sid) void registerChannel(sid, true);
-    }, 30_000);
+    }, 60_000);
 
     const retire = () => {
       navigator.sendBeacon?.(
@@ -460,7 +460,7 @@ export function Broadcast() {
     };
 
     const first = setTimeout(() => void beat(), 0);
-    const id2 = setInterval(() => void beat(), 20_000);
+    const id2 = setInterval(() => void beat(), 60_000);
     return () => {
       alive = false;
       clearTimeout(first);

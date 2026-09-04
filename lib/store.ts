@@ -25,13 +25,53 @@ import { head, put } from "@vercel/blob";
 const DIR = path.join(process.cwd(), ".data");
 const token = process.env.BLOB_READ_WRITE_TOKEN;
 
-export type StoreKind = "blob" | "file";
+/**
+ * Upstash-style Redis, preferred over Blob when configured.
+ *
+ * Blob was the wrong tool for this. It is object storage billed per operation,
+ * and this app writes small documents constantly — a presence heartbeat every
+ * twenty seconds per viewer, a registry refresh on every clip. That ran the
+ * store into suspension, and once writes fail the registry reads empty, so
+ * every tab believes no broadcast exists and starts one of its own. The
+ * one-stream guarantee was only ever as reliable as the store underneath it.
+ */
+const REDIS_URL = process.env.KV_REST_API_URL;
+const REDIS_TOKEN = process.env.KV_REST_API_TOKEN;
+
+/** Last-resort per-instance memory, so a dead store degrades rather than 500s. */
+const memory = new Map<string, string>();
+
+export type StoreKind = "redis" | "blob" | "file" | "memory";
 
 export function storeKind(): StoreKind {
-  return token ? "blob" : "file";
+  if (REDIS_URL && REDIS_TOKEN) return "redis";
+  if (token) return "blob";
+  return "file";
+}
+
+async function redis(command: unknown[]): Promise<unknown> {
+  const res = await fetch(REDIS_URL as string, {
+    method: "POST",
+    headers: { Authorization: `Bearer ${REDIS_TOKEN}`, "Content-Type": "application/json" },
+    body: JSON.stringify(command),
+    cache: "no-store",
+  });
+  if (!res.ok) throw new Error(`Redis ${res.status}`);
+  return ((await res.json()) as { result?: unknown }).result;
 }
 
 export async function readJson<T>(key: string, fallback: T): Promise<T> {
+  if (REDIS_URL && REDIS_TOKEN) {
+    try {
+      const raw = await redis(["GET", key]);
+      if (typeof raw === "string") return JSON.parse(raw) as T;
+    } catch {
+      // Fall through: a reachable fallback beats an error.
+    }
+    const held = memory.get(key);
+    return held ? (JSON.parse(held) as T) : fallback;
+  }
+
   if (token) {
     try {
       // `head` resolves the pathname to its current URL; the URL is then read
@@ -50,13 +90,26 @@ export async function readJson<T>(key: string, fallback: T): Promise<T> {
   try {
     return JSON.parse(await readFile(path.join(DIR, `${key}.json`), "utf8")) as T;
   } catch {
-    return fallback;
+    const held = memory.get(key);
+    return held ? (JSON.parse(held) as T) : fallback;
   }
 }
 
 /** Returns whether the value is actually persisted. Never throws. */
 export async function writeJson(key: string, value: unknown): Promise<boolean> {
   const encoded = JSON.stringify(value);
+  // Always kept locally too: a suspended or unreachable store then degrades to
+  // per-instance state instead of losing the write outright.
+  memory.set(key, encoded);
+
+  if (REDIS_URL && REDIS_TOKEN) {
+    try {
+      await redis(["SET", key, encoded]);
+      return true;
+    } catch {
+      return false;
+    }
+  }
 
   if (token) {
     try {
