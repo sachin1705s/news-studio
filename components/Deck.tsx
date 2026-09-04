@@ -579,7 +579,12 @@ function DeckInner({
       // slot, so the channel reads as a funding feed with news attached. A
       // bulletin should feel like a bulletin: a raise, then a court ruling,
       // then a launch, in no particular order.
-      return shuffle(all, runSeed.current + cycle.current);
+      //
+      // The shuffle runs over the freshest of the wire rather than all of it:
+      // the feeds carry a week of history and the median item is half a day
+      // old, so shuffling everything is as likely to surface Tuesday as today.
+      const fresh = [...all].sort((a, b) => b.publishedAt - a.publishedAt).slice(0, 60);
+      return shuffle(fresh, runSeed.current + cycle.current);
     },
     [program.categories],
   );
@@ -598,6 +603,22 @@ function DeckInner({
     const now = Date.now();
     for (const [id, at] of usedStoryIds.current) {
       if (now - at > RETIRE_MS) usedStoryIds.current.delete(id);
+    }
+
+    // Merge in what the channel has broadcast, not just this browser. The
+    // history used to be local, so a restart in another browser began blank and
+    // replayed the same bulletin — and this channel restarts often.
+    try {
+      const res = await fetch("/api/aired", { cache: "no-store" });
+      if (res.ok) {
+        const body = (await res.json()) as { aired?: Record<string, number> };
+        for (const [id, at] of Object.entries(body.aired ?? {})) {
+          const held = usedStoryIds.current.get(id);
+          if (!held || held < at) usedStoryIds.current.set(id, at);
+        }
+      }
+    } catch {
+      // Local history alone still prevents the worst of it.
     }
 
     let all = await gather(strand, false, angle);
@@ -627,6 +648,12 @@ function DeckInner({
     }
 
     pool.forEach((s) => usedStoryIds.current.set(s.id, now));
+    // Tell the channel, so the next origin does not run these again.
+    void fetch("/api/aired", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ ids: pool.map((s) => s.id) }),
+    }).catch(() => {});
 
     // The library is the floor: every story gets footage even with no producer
     // reachable, so the channel always cuts away.
