@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import { openSessions } from "@/lib/reactor-sessions";
 import { readJson } from "@/lib/store";
 
 export const runtime = "nodejs";
@@ -67,7 +68,28 @@ export async function POST(request: Request) {
     }
   }
 
-  // The origin gate. A browser cannot start a broadcast without a token, and
+  // Reactor is asked directly whether a broadcast already exists. This is the
+  // gate that actually holds: it does not depend on a store that can be
+  // suspended, and it is the same system that holds the GPUs.
+  if (!sessionId) {
+    try {
+      const open = await openSessions(apiKey);
+      if (open.length > 0) {
+        return NextResponse.json(
+          {
+            error: "A broadcast is already running.",
+            sessionId: open[0].sessionId,
+          },
+          { status: 409 },
+        );
+      }
+    } catch {
+      // Reactor unreachable. The registry check below is the remaining guard.
+    }
+  }
+
+  // The registry gate. Faster than asking Reactor and carries the origin's
+  // identity, but only as reliable as the store behind it.
   // this is the only place tokens come from — so refusing here is the one
   // control that actually holds. Everything client-side is advisory: a stale
   // read, a lost race or a hand-edited page can all get past it.

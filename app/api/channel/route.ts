@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import { openSessions } from "@/lib/reactor-sessions";
 import { readJson, writeJson } from "@/lib/store";
 
 export const runtime = "nodejs";
@@ -49,7 +50,30 @@ const RESERVE_MS = 60_000;
 export async function GET() {
   const live = await readJson<Registration | null>(KEY, null);
   const now = Date.now();
-  const fresh = live && now - live.heartbeatAt <= STALE_MS ? live : null;
+  let fresh = live && now - live.heartbeatAt <= STALE_MS ? live : null;
+
+  // The registry can be empty because nothing is running, or because the store
+  // that holds it is unavailable. Those look identical from here and mean
+  // opposite things, so when it is empty Reactor is asked directly — otherwise
+  // a broken store tells every arrival to start its own broadcast.
+  if (!fresh?.sessionId) {
+    const apiKey = process.env.REACTOR_API_KEY;
+    if (apiKey) {
+      try {
+        const open = await openSessions(apiKey);
+        if (open.length > 0) {
+          fresh = {
+            sessionId: open[0].sessionId,
+            originId: "unknown",
+            startedAt: open[0].createdAt,
+            heartbeatAt: now,
+          };
+        }
+      } catch {
+        // Leave it empty; the caller will start a broadcast.
+      }
+    }
+  }
 
   // Only a registration with a session is something to join. A live
   // reservation is reported separately so an arrival waits rather than
