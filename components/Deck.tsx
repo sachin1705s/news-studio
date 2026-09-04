@@ -131,6 +131,18 @@ async function fetchToken(adopt: string | null): Promise<string> {
 
 const originToken = () => fetchToken(null);
 
+/**
+ * Forget the origin token.
+ *
+ * `max_sessions` counts sessions a token has ever created, so a token that has
+ * been through a few broadcasts is spent. Dropping it when a session ends means
+ * the next start asks for a fresh one instead of retrying with a credential
+ * that will be refused.
+ */
+export function releaseOriginToken(): void {
+  tokenCache.delete("origin");
+}
+
 export function Deck(props: DeckProps) {
   return (
     <FastH3Provider jwtToken={originToken} connectOptions={{ autoConnect: true }}>

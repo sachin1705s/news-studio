@@ -83,11 +83,14 @@ export async function POST(request: Request) {
     ? // A viewer never needs to create one. The floor the API accepts is 1, so
       // this cannot be zero — a short expiry is what bounds it instead.
       { max_sessions: 1 }
-    : // One session per token, enforced by Reactor rather than by us. Even if
-      // two browsers somehow hold the same origin token, the second create is
-      // refused server-side, which is a guarantee no amount of client-side
-      // coordination can give.
-      { max_sessions: 1, max_session_duration_seconds: MAX_SESSION_SECONDS };
+    : // Not 1. `max_sessions` counts sessions the token has EVER created, not
+      // how many at once, and the SDK caches a token for its lifetime — so a
+      // cap of one meant the first broadcast worked and every restart after it
+      // was refused, leaving the channel unable to come back. A small allowance
+      // covers reconnects and restarts within the token's hour; the single
+      // broadcast is guaranteed by the gate above, which is a real check rather
+      // than a side effect of a counter.
+      { max_sessions: 6, max_session_duration_seconds: MAX_SESSION_SECONDS };
 
   const res = await fetch("https://api.reactor.inc/tokens", {
     method: "POST",

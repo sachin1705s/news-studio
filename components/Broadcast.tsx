@@ -5,7 +5,14 @@ import { currentProgram, type Program } from "@/lib/programs";
 import { loadAired, saveAired } from "@/lib/history";
 import { STRAND_MINUTES } from "@/lib/strands";
 import type { Comment, Segment } from "@/lib/types";
-import { Deck, ViewerDeck, type ClipMeta, type DeckStats, type ViewerTake } from "./Deck";
+import {
+  Deck,
+  ViewerDeck,
+  releaseOriginToken,
+  type ClipMeta,
+  type DeckStats,
+  type ViewerTake,
+} from "./Deck";
 import { ChannelBug, Clock, CommunityPanel, LowerThird, StatusRail, Ticker } from "./Chrome";
 import { ReactorMark } from "./ReactorMark";
 
@@ -230,6 +237,11 @@ export function Broadcast() {
    * other arrival that reads it would attach to the same corpse.
    */
   const takeOverDeadChannel = useCallback(async () => {
+    // Fresh credential for a fresh broadcast. Done here, before a session
+    // exists — swapping the token under a running one leaves the SDK holding a
+    // credential that did not create the session, which cannot even terminate
+    // it, and the connection churns.
+    releaseOriginToken();
     try {
       await fetch("/api/channel", { method: "DELETE" });
       // Reserve the channel BEFORE bringing a session up. Creating first and
@@ -672,6 +684,7 @@ export function Broadcast() {
       return;
     }
 
+    releaseOriginToken();
     setRole("origin");
     setAdoptSessionId(null);
     setMuted(false);
