@@ -143,7 +143,7 @@ export async function POST(request: Request) {
         {
           type: "session",
           resources: {
-            models: { match: ["fast-h3"] },
+            models: { match: ["reactor/fast-h3"] },
             ...(sessionId ? { sessions: { bind: [sessionId] } } : {}),
           },
           constraints,
